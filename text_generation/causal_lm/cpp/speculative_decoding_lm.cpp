@@ -124,6 +124,8 @@ public:
         int64_t prev_seq_len = seq_len;
         seq_len += input_ids.get_shape()[1];
 
+        std::cout << "Updated seq_len: new " << seq_len << " prev " << prev_seq_len << "\n";
+
         slot_mapping.set_shape(input_ids.get_shape());
         std::iota(slot_mapping.data<int64_t>(), slot_mapping.data<int64_t>() + seq_len - prev_seq_len, prev_seq_len);
 
@@ -135,6 +137,10 @@ public:
         size_t blocks_num = (seq_len + block_size - 1) / block_size;
         block_tables.set_shape({BATCH_SIZE, blocks_num});
         std::iota(block_tables.data<int32_t>(), block_tables.data<int32_t>() + blocks_num, 0);
+    }
+
+    void reduce_seq_len(int64_t val) {
+        seq_len -= val;
     }
 
 private:
@@ -176,23 +182,42 @@ int main(int argc, char* argv[]) try {
 
     std::vector<ov::Tensor> draft_kv_inputs;
     std::vector<ov::Tensor> main_kv_inputs;
-    const size_t kv_inputs_num = 32;
-    const size_t kv_heads_num = 32;
-    const size_t head_size = 128;
+    size_t kv_inputs_num = 32;
     const ov::element::Type cache_dt = draft_ov_model->input("past_key_values.0.key").get_element_type();
 
     const size_t x_block_size = 16 / (cache_dt.bitwidth() / 8);
     const size_t block_size = 16;
 
+    std::cout << "Used block_size " << block_size << " x_block_size " << x_block_size << "\n";
+
     // Allocate inputs
     for (size_t i = 0; i < kv_inputs_num * 2; i++) {
+        // parameter:past_key_values.0.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:2416x32x16x16x8:nopad
+        // parameter:past_key_values.0.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:2416x32x128x16:nopad
         const size_t kv_cache_blocks_num = 200;
+        const size_t kv_heads_num = 32;
+        const size_t head_size = 128;
         auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
 
-        ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, 32, block_size, x_block_size};
+        ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
         ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
 
         draft_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
+    }
+
+    // Allocate inputs
+    kv_inputs_num = 40;
+    for (size_t i = 0; i < kv_inputs_num * 2; i++) {
+        // parameter:past_key_values.4.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:974x40x16x16x8:nopad
+        // parameter:past_key_values.4.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:974x40x128x16:nopad
+        const size_t kv_cache_blocks_num = 200;
+        const size_t kv_heads_num = 40;
+        const size_t head_size = 128;
+        auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
+
+        ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
+        ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
+
         main_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
     }
 
@@ -202,7 +227,7 @@ int main(int argc, char* argv[]) try {
     uint64_t seq_len = draft_input_ids.get_shape()[1];
 
     // main model
-    auto main_compiled_model = core.compile_model(std::string{argv[2]} + "/openvino_model.xml", device);
+    auto main_compiled_model = core.compile_model(std::string{argv[3]} + "/openvino_model.xml", device);
     ov::InferRequest main_model = main_compiled_model.create_infer_request();
 
     // Input tensors for the main model should not be mixed with draft.
@@ -237,12 +262,19 @@ int main(int argc, char* argv[]) try {
     draft_model_pa_manager.update_tensors(draft_input_ids);
     main_model_pa_manager.update_tensors(input_ids);
 
+    std::cout << "Set kv_cache for draft model (" << draft_kv_inputs.size() << ")\n";
     for (size_t i = 0; i < draft_kv_inputs.size(); i++) {
         std::string kv_input = "past_key_values." + std::to_string(i / 2) + "." + (i % 2 == 0 ? "key" : "value");
         draft_model.set_tensor(kv_input, draft_kv_inputs[i]);
+    }
+
+    std::cout << "Set kv_cache for main model (" << main_kv_inputs.size() << ")\n";
+    for (size_t i = 0; i < main_kv_inputs.size(); i++) {
+        std::string kv_input = "past_key_values." + std::to_string(i / 2) + "." + (i % 2 == 0 ? "key" : "value");
         main_model.set_tensor(kv_input, main_kv_inputs[i]);
     }
 
+    std::cout << "Start inference \n";
     // set beam_idx for stateful model: no beam search is used and BATCH_SIZE = 1
     // draft_model.get_tensor("beam_idx").set_shape({BATCH_SIZE});
     // draft_model.get_tensor("beam_idx").data<int32_t>()[0] = 0;
@@ -264,6 +296,7 @@ int main(int argc, char* argv[]) try {
     // the first token which is fed to both draft and main netwoks on each iteration
     auto first_token = out_token;
     text_streamer.put(out_token);
+    std::cout << "First token " << first_token << "\n";
 
     // run K infer requests on draft model and get next K prediction tokens on each iteration
     uint64_t K = 5;
@@ -287,7 +320,7 @@ int main(int argc, char* argv[]) try {
    the main model (which is bigger, more accurate but slower) instead of running K
    subsequent requests.
    */
-    int max_sequence_length = 20;
+    int max_sequence_length = 30;
     while (out_token != SPECIAL_EOS_TOKEN && seq_len < max_sequence_length) {
         // infer the K next tokens with draft model
         for (int i = 0; i < K; ++i) {
@@ -302,27 +335,45 @@ int main(int argc, char* argv[]) try {
 
             auto draft_logits = draft_model.get_tensor("logits").data<float>();
             int64_t arg_max_token = std::max_element(draft_logits, draft_logits + vocab_size) - draft_logits;
+            // std::cout << "Draft model result [" << i << "]=" << arg_max_token << " for input " << out_token << "\n";
             out_token = arg_max_token;
             draft_tokens.emplace_back(arg_max_token);
         }
+
+        // std::cout << "Finished draft execution. Generated tokens:\n";
+        // for (size_t i = 0; i < draft_tokens.size(); i++) {
+        //     std::cout << i << ". " << draft_tokens[i] << "\n";
+        // }
 
         // For the main network, K tokens will be fed at once in a single infer request.
         input_ids.set_shape({BATCH_SIZE, K});
         // Set the first token for the main model to be the same as for the draft model.
         input_ids.data<int64_t>()[0] = first_token;
-        for (int i = 0; i < K - 1; i++)
+        // std::cout << "Set main model input tokens[0]=" << first_token << "\n";
+        for (int i = 0; i < K - 1; i++) {
+            // std::cout << "Set main model input tokens[" << i + 1 << "]=" << draft_tokens[i] << "\n";
             input_ids.data<int64_t>()[i + 1] = draft_tokens[i];
+        }
 
         position_ids.set_shape({BATCH_SIZE, K});
         std::iota(position_ids.data<int64_t>(), position_ids.data<int64_t>() + position_ids.get_size(), seq_len);
 
         main_model_pa_manager.update_tensors(input_ids);
-        is_prompt.data<bool>()[0] = false;
+        /* Need to apply attention mask to the last N tokens, so use hack to determine it inside the kernel */
+        auto ptr = is_prompt.data<bool>();
+        reinterpret_cast<uint8_t*>(ptr)[0] = 2;
 
         main_model.infer();
 
         data_logits = logits.data<float>();  // [BATCH_SIZE, K, vocab_size]
         size_t disagree_idx = K - 1;
+
+        for (size_t i = 0; i < K; i++) {
+            auto start = data_logits + vocab_size * i;
+            auto stop = data_logits + vocab_size * (i + 1);
+            out_token = std::max_element(start, stop) - start;
+            // std::cout << "Main model " << i << "th token: " << out_token << "\n";
+        }
         // Iterate through the predicted tokens from the main model and compare them with draft predictions.
         // In the worst-case scenario (disagreement at the beginning), iter will increase by 1.
         // In the best-case scenario, all elements match, and K predicted tokens will be taken.
@@ -335,14 +386,20 @@ int main(int argc, char* argv[]) try {
             disagree_idx = i;
             if (out_token != draft_tokens[i] || out_token == SPECIAL_EOS_TOKEN || seq_len + disagree_idx + 1 >= max_sequence_length)
                 break;
+
+            // if (i == 2) {
+            //     std::cout << "Forced exit for i=" << i << " (emulate error in draft model computation)\n";
+            //     break;
+            // }
         }
 
         // After the inference request, key/values have shape [BATCH_SIZE, seq_len + K, vocab_size].
         // Increment the sequence length by the number of matched tokens, and
         // trim the KV cache to match the new sequence length.
         seq_len += disagree_idx + 1;
-        update_kv_cache(draft_model, SEQ_LEN_AXIS, seq_len);
-        update_kv_cache(main_model, SEQ_LEN_AXIS, seq_len);
+
+        draft_model_pa_manager.reduce_seq_len(K - disagree_idx - 1);
+        main_model_pa_manager.reduce_seq_len(K - disagree_idx - 1);
 
         draft_tokens.clear();
         first_token = out_token;
