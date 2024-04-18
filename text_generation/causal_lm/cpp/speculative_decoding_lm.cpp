@@ -124,7 +124,7 @@ public:
         int64_t prev_seq_len = seq_len;
         seq_len += input_ids.get_shape()[1];
 
-        std::cout << "Updated seq_len: new " << seq_len << " prev " << prev_seq_len << "\n";
+        // std::cout << "Updated seq_len: new " << seq_len << " prev " << prev_seq_len << "\n";
 
         slot_mapping.set_shape(input_ids.get_shape());
         std::iota(slot_mapping.data<int64_t>(), slot_mapping.data<int64_t>() + seq_len - prev_seq_len, prev_seq_len);
@@ -282,6 +282,7 @@ int main(int argc, char* argv[]) try {
     // main_model.get_tensor("beam_idx").data<int32_t>()[0] = 0;
 
     // To coollect kv-cache for the <PROMPT> and to get the next token run the very first infer request
+    auto time0 = std::chrono::high_resolution_clock::now();
     draft_model.infer();
     main_model.infer();
 
@@ -320,7 +321,8 @@ int main(int argc, char* argv[]) try {
    the main model (which is bigger, more accurate but slower) instead of running K
    subsequent requests.
    */
-    int max_sequence_length = 30;
+    std::map<size_t, size_t> hit_stat;
+    int max_sequence_length = 64;
     while (out_token != SPECIAL_EOS_TOKEN && seq_len < max_sequence_length) {
         // infer the K next tokens with draft model
         for (int i = 0; i < K; ++i) {
@@ -363,7 +365,10 @@ int main(int argc, char* argv[]) try {
         auto ptr = is_prompt.data<bool>();
         reinterpret_cast<uint8_t*>(ptr)[0] = 2;
 
+        auto time2 = std::chrono::high_resolution_clock::now();
         main_model.infer();
+        auto time3 = std::chrono::high_resolution_clock::now();
+        std::cout << "Time for main model = " << time_res2 << "ms\n";
 
         data_logits = logits.data<float>();  // [BATCH_SIZE, K, vocab_size]
         size_t disagree_idx = K - 1;
@@ -397,6 +402,10 @@ int main(int argc, char* argv[]) try {
         // Increment the sequence length by the number of matched tokens, and
         // trim the KV cache to match the new sequence length.
         seq_len += disagree_idx + 1;
+        if (hit_stat.count(disagree_idx + 1) == 0)
+            hit_stat[disagree_idx + 1] = 1;
+        else
+            hit_stat[disagree_idx + 1]++;
 
         draft_model_pa_manager.reduce_seq_len(K - disagree_idx - 1);
         main_model_pa_manager.reduce_seq_len(K - disagree_idx - 1);
@@ -405,6 +414,16 @@ int main(int argc, char* argv[]) try {
         first_token = out_token;
     }
     text_streamer.end();
+
+    std::cout << "Total tokens: " << seq_len << "\n";
+
+    auto time1 = std::chrono::high_resolution_clock::now();
+    auto time_res0 = std::chrono::duration_cast<std::chrono::milliseconds>(time1 - time0).count();
+    std::cout << "Total time: " << time_res0 << "ms\n";
+    std::cout << "Hit statistic:\n";
+    for (auto& entry : hit_stat)
+        std::cout << entry.first << ": " << entry.second << "\n";
+    exit(0);
     // Model is stateful which means that context (kv-cache) which belongs to a particular
     // text sequence is accumulated inside the model during the generation loop above.
     // This context should be reset before processing the next text sequence.
