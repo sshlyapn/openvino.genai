@@ -125,11 +125,10 @@ public:
         seq_len += input_ids.get_shape()[1];
 
         // std::cout << "Updated seq_len: new " << seq_len << " prev " << prev_seq_len << "\n";
-
         slot_mapping.set_shape(input_ids.get_shape());
         std::iota(slot_mapping.data<int64_t>(), slot_mapping.data<int64_t>() + seq_len - prev_seq_len, prev_seq_len);
 
-        max_context_len.data<int32_t>()[0] = seq_len;
+        max_context_len.data<int64_t>()[0] = seq_len;
 
         context_lens.set_shape({BATCH_SIZE});
         context_lens.data<int64_t>()[0] = seq_len;
@@ -165,7 +164,24 @@ int main(int argc, char* argv[]) try {
     // tokenizer and detokenizer work on CPU only
     ov::InferRequest tokenizer = core.compile_model(
         std::string{argv[2]} + "/openvino_tokenizer.xml", "CPU").create_infer_request();
-    auto [draft_input_ids, draft_attention_mask] = tokenize(tokenizer, argv[4]);
+
+    std::string prompt = "from typing import List\n"
+"\n"
+"\n"
+"def has_close_elements(numbers: List[float], threshold: float) -> bool:\n"
+"    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n"
+"   given threshold.\n"
+"   >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n"
+"   False\n"
+"   >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n"
+"   True\n"
+"   \"\"\"";
+
+    prompt = "int a = 1; int b = 2; int c = 3;";
+
+    std::cout << "Prompt: " << prompt << "\n";
+
+    auto [draft_input_ids, draft_attention_mask] = tokenize(tokenizer, std::move(prompt));
 
     ov::InferRequest detokenizer = core.compile_model(
         std::string{argv[2]} + "/openvino_detokenizer.xml", "CPU").create_infer_request();
@@ -176,9 +192,10 @@ int main(int argc, char* argv[]) try {
     std::string device = argv[1];
     auto draft_ov_model = core.read_model(std::string{argv[2]} + "/openvino_model.xml");
 
-    auto draft_compiled_model = core.compile_model(draft_ov_model, device);
+    std::string draft_model_device = "CPU";
+    auto draft_compiled_model = core.compile_model(draft_ov_model, draft_model_device);
 
-    std::cout << "Draft model [" << std::string{argv[2]} + "/openvino_model.xml" << " was loaded on " << device << "\n";
+    std::cout << "Draft model [" << std::string{argv[2]} + "/openvino_model.xml" << " was loaded on " << draft_model_device << "\n";
     ov::InferRequest draft_model = draft_compiled_model.create_infer_request();
 
     draft_model.set_tensor("input_ids", draft_input_ids);
@@ -195,13 +212,14 @@ int main(int argc, char* argv[]) try {
     // Allocate inputs
     size_t kv_inputs_num = 20;
     for (size_t i = 0; i < kv_inputs_num * 2; i++) {
+        auto x_block_size = draft_model_device == "CPU" ? 1 : 8;
+        auto block_size = draft_model_device == "CPU" ? 1 : 16;
         // parameter:past_key_values.0.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:2416x32x16x16x8:nopad
         // parameter:past_key_values.0.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:2416x32x128x16:nopad
         const ov::element::Type cache_dt = draft_ov_model->input("past_key_values.0.key").get_element_type();
-        const size_t kv_cache_blocks_num = 200;
+        const size_t kv_cache_blocks_num = 1000;
         const size_t kv_heads_num = 16;
         const size_t head_size = 64;
-        auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
 
         ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
         ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
@@ -212,7 +230,12 @@ int main(int argc, char* argv[]) try {
             std::cout << "Draft model value shape: " << value_cache_shape << "\n";
         }
 
-        draft_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
+        if (draft_model_device == "CPU") {
+            draft_kv_inputs.push_back(ov::Tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
+        } else {
+            auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
+            draft_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
+        }
     }
 
     ov::Tensor draft_position_ids = draft_model.get_tensor("position_ids");
@@ -245,18 +268,18 @@ int main(int argc, char* argv[]) try {
         // parameter:past_key_values.4.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:974x40x16x16x8:nopad
         // parameter:past_key_values.4.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:974x40x128x16:nopad
         const ov::element::Type cache_dt = main_ov_model->input("past_key_values.0.key").get_element_type();
-        const size_t kv_cache_blocks_num = 200;
+        const size_t kv_cache_blocks_num = 400;
         const size_t kv_heads_num = 32;
         const size_t head_size = 80;
-        auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
+        auto remote_context = main_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
 
         ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
         ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
 
         if (i == 0) {
-            std::cout << "Draft model key/value cache dt: " << cache_dt << "\n";
-            std::cout << "Draft model key cache shape: " << key_cache_shape << "\n";
-            std::cout << "Draft model value shape: " << value_cache_shape << "\n";
+            std::cout << "Main model key/value cache dt: " << cache_dt << "\n";
+            std::cout << "Main model key cache shape: " << key_cache_shape << "\n";
+            std::cout << "Main model value shape: " << value_cache_shape << "\n";
         }
 
         main_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
@@ -288,10 +311,14 @@ int main(int argc, char* argv[]) try {
     ov::Tensor context_lens = main_model.get_tensor("context_lens");
     ov::Tensor block_tables = main_model.get_tensor("block_tables");
 
-    PagedAttentionManager draft_model_pa_manager(draft_slot_mapping, draft_max_context_len, draft_context_lens, draft_block_tables);
+    PagedAttentionManager draft_model_pa_manager(draft_slot_mapping, draft_max_context_len, draft_context_lens, draft_block_tables, draft_model_device == "CPU" ? 1 : 16);
     PagedAttentionManager main_model_pa_manager(slot_mapping, max_context_len, context_lens, block_tables);
 
-    draft_model_pa_manager.update_tensors(draft_input_ids);
+    try {
+        draft_model_pa_manager.update_tensors(draft_input_ids);
+    } catch (const std::exception& error) {
+        std::cerr << "draft model: " << error.what() << '\n';
+    }
     main_model_pa_manager.update_tensors(input_ids);
 
     std::cout << "Set kv_cache for draft model (" << draft_kv_inputs.size() << ")\n";
@@ -315,8 +342,16 @@ int main(int argc, char* argv[]) try {
 
     // To coollect kv-cache for the <PROMPT> and to get the next token run the very first infer request
     auto time0 = std::chrono::high_resolution_clock::now();
-    draft_model.infer();
-    main_model.infer();
+    try {
+        draft_model.infer();
+    } catch (const std::exception& error) {
+        std::cerr << "draft model: " << error.what() << '\n';
+    }
+    try {
+        main_model.infer();
+    } catch (const std::exception& error) {
+        std::cerr << "main model: " << error.what() << '\n';
+    }
 
     size_t vocab_size = draft_model.get_tensor("logits").get_shape().back();
     OPENVINO_ASSERT(vocab_size == main_model.get_tensor("logits").get_shape().back(), "vocab size should be the same for the both models");
@@ -354,7 +389,9 @@ int main(int argc, char* argv[]) try {
    subsequent requests.
    */
     std::map<size_t, size_t> hit_stat;
-    int max_sequence_length = 128;
+    int max_sequence_length = 512;
+    std::vector<size_t> draft_model_time;
+    std::vector<size_t> main_model_time;
     while (out_token != SPECIAL_EOS_TOKEN && seq_len < max_sequence_length) {
         // infer the K next tokens with draft model
         for (int i = 0; i < K; ++i) {
@@ -365,7 +402,16 @@ int main(int argc, char* argv[]) try {
 
             draft_model_pa_manager.update_tensors(draft_input_ids);
 
-            draft_model.infer();
+            auto time0 = std::chrono::high_resolution_clock::now();
+            try {
+                draft_model.infer();
+            } catch (const std::exception& error) {
+                std::cerr << "draft model: " << error.what() << '\n';
+                return EXIT_FAILURE;
+            }
+            auto time1 = std::chrono::high_resolution_clock::now();
+            auto time_res0 = std::chrono::duration_cast<std::chrono::milliseconds>(time1 - time0).count();
+            draft_model_time.push_back(time_res0);
 
             auto draft_logits = draft_model.get_tensor("logits").data<float>();
             int64_t arg_max_token = std::max_element(draft_logits, draft_logits + vocab_size) - draft_logits;
@@ -397,7 +443,16 @@ int main(int argc, char* argv[]) try {
         auto ptr = is_prompt.data<bool>();
         reinterpret_cast<uint8_t*>(ptr)[0] = 2;
 
-        main_model.infer();
+        auto time0 = std::chrono::high_resolution_clock::now();
+        try {
+            main_model.infer();
+        } catch (const std::exception& error) {
+            std::cerr << "main model: " << error.what() << '\n';
+            return EXIT_FAILURE;
+        }
+        auto time1 = std::chrono::high_resolution_clock::now();
+        auto time_res0 = std::chrono::duration_cast<std::chrono::milliseconds>(time1 - time0).count();
+        main_model_time.push_back(time_res0);
 
         data_logits = logits.data<float>();  // [BATCH_SIZE, K, vocab_size]
         size_t disagree_idx = K - 1;
@@ -452,6 +507,24 @@ int main(int argc, char* argv[]) try {
     std::cout << "Hit statistic:\n";
     for (auto& entry : hit_stat)
         std::cout << entry.first << ": " << entry.second << "\n";
+
+    size_t avg_time = 0;
+    std::stringstream ss;
+    for (auto& val : draft_model_time) {
+        ss << val << " ";
+        avg_time += val;
+    }
+    std::cout << "Draft model AVG time: " << (avg_time / draft_model_time.size()) << " {" << ss.str() << "}\n";
+
+    avg_time = 0;
+    ss.str(std::string());
+    ss.clear();
+    for (auto& val : main_model_time) {
+        ss << val << " ";
+        avg_time += val;
+    }
+    std::cout << "Main model AVG time: " << (avg_time / main_model_time.size()) << " {" << ss.str() << "}\n";
+
     exit(0);
     // Model is stateful which means that context (kv-cache) which belongs to a particular
     // text sequence is accumulated inside the model during the generation loop above.
