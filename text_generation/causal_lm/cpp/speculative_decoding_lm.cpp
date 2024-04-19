@@ -171,54 +171,48 @@ int main(int argc, char* argv[]) try {
         std::string{argv[2]} + "/openvino_detokenizer.xml", "CPU").create_infer_request();
     TextStreamer text_streamer{std::move(detokenizer)};
 
+    std::cout << "Tokenizer and detokenizer were loaded\n";
+
     std::string device = argv[1];
-    // draft model
     auto draft_ov_model = core.read_model(std::string{argv[2]} + "/openvino_model.xml");
 
     auto draft_compiled_model = core.compile_model(draft_ov_model, device);
+
+    std::cout << "Draft model [" << std::string{argv[2]} + "/openvino_model.xml" << " was loaded on " << device << "\n";
     ov::InferRequest draft_model = draft_compiled_model.create_infer_request();
 
     draft_model.set_tensor("input_ids", draft_input_ids);
 
     std::vector<ov::Tensor> draft_kv_inputs;
     std::vector<ov::Tensor> main_kv_inputs;
-    size_t kv_inputs_num = 32;
-    const ov::element::Type cache_dt = draft_ov_model->input("past_key_values.0.key").get_element_type();
 
-    const size_t x_block_size = 16 / (cache_dt.bitwidth() / 8);
+    // const size_t x_block_size = 16 / (cache_dt.bitwidth() / 8);
+    const size_t x_block_size = 8;
     const size_t block_size = 16;
 
     std::cout << "Used block_size " << block_size << " x_block_size " << x_block_size << "\n";
 
     // Allocate inputs
+    size_t kv_inputs_num = 20;
     for (size_t i = 0; i < kv_inputs_num * 2; i++) {
         // parameter:past_key_values.0.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:2416x32x16x16x8:nopad
         // parameter:past_key_values.0.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:2416x32x128x16:nopad
+        const ov::element::Type cache_dt = draft_ov_model->input("past_key_values.0.key").get_element_type();
         const size_t kv_cache_blocks_num = 200;
-        const size_t kv_heads_num = 32;
-        const size_t head_size = 128;
+        const size_t kv_heads_num = 16;
+        const size_t head_size = 64;
         auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
 
         ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
         ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
+
+        if (i == 0) {
+            std::cout << "Draft model key/value cache dt: " << cache_dt << "\n";
+            std::cout << "Draft model key cache shape: " << key_cache_shape << "\n";
+            std::cout << "Draft model value shape: " << value_cache_shape << "\n";
+        }
 
         draft_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
-    }
-
-    // Allocate inputs
-    kv_inputs_num = 40;
-    for (size_t i = 0; i < kv_inputs_num * 2; i++) {
-        // parameter:past_key_values.4.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:974x40x16x16x8:nopad
-        // parameter:past_key_values.4.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:974x40x128x16:nopad
-        const size_t kv_cache_blocks_num = 200;
-        const size_t kv_heads_num = 40;
-        const size_t head_size = 128;
-        auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
-
-        ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
-        ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
-
-        main_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
     }
 
     ov::Tensor draft_position_ids = draft_model.get_tensor("position_ids");
@@ -227,8 +221,46 @@ int main(int argc, char* argv[]) try {
     uint64_t seq_len = draft_input_ids.get_shape()[1];
 
     // main model
-    auto main_compiled_model = core.compile_model(std::string{argv[3]} + "/openvino_model.xml", device);
+    std::shared_ptr<ov::Model> main_ov_model;
+    try {
+        main_ov_model = core.read_model(std::string{argv[3]} + "/openvino_model.xml");
+    } catch (const std::exception& ex) {
+        std::cout << ex.what() << "\n";
+    }
+
+    bool fp32_for_main_model = true;
+    if (fp32_for_main_model)
+        std::cout << "\nINFO:fp32 was forced for main model\n\n";
+
+    auto main_compiled_model = fp32_for_main_model ? core.compile_model(main_ov_model, device, ov::hint::inference_precision(ov::element::f32))
+                                                   : core.compile_model(main_ov_model, device);
+
     ov::InferRequest main_model = main_compiled_model.create_infer_request();
+
+    std::cout << "Main model [" << std::string{argv[3]} + "/openvino_model.xml" << " was loaded on " << device << "\n";
+
+    // Allocate inputs
+    kv_inputs_num = 32;
+    for (size_t i = 0; i < kv_inputs_num * 2; i++) {
+        // parameter:past_key_values.4.key was: f16:bfzyx:?x?x?x?x?:nopad now: f16:bfzyx:974x40x16x16x8:nopad
+        // parameter:past_key_values.4.value was: f16:bfyx:?x?x?x?:nopad now: f16:bfyx:974x40x128x16:nopad
+        const ov::element::Type cache_dt = main_ov_model->input("past_key_values.0.key").get_element_type();
+        const size_t kv_cache_blocks_num = 200;
+        const size_t kv_heads_num = 32;
+        const size_t head_size = 80;
+        auto remote_context = draft_compiled_model.get_context().as<ov::intel_gpu::ocl::ClContext>();
+
+        ov::Shape key_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size / x_block_size, block_size, x_block_size};
+        ov::Shape value_cache_shape = {kv_cache_blocks_num, kv_heads_num, head_size, block_size};
+
+        if (i == 0) {
+            std::cout << "Draft model key/value cache dt: " << cache_dt << "\n";
+            std::cout << "Draft model key cache shape: " << key_cache_shape << "\n";
+            std::cout << "Draft model value shape: " << value_cache_shape << "\n";
+        }
+
+        main_kv_inputs.push_back(remote_context.create_tensor(cache_dt, i % 2 == 0 ? key_cache_shape : value_cache_shape));
+    }
 
     // Input tensors for the main model should not be mixed with draft.
     // Do not feed the same draft_postion_ids to the main, but copy input_ids from the draft_input_ids
@@ -322,7 +354,7 @@ int main(int argc, char* argv[]) try {
    subsequent requests.
    */
     std::map<size_t, size_t> hit_stat;
-    int max_sequence_length = 64;
+    int max_sequence_length = 128;
     while (out_token != SPECIAL_EOS_TOKEN && seq_len < max_sequence_length) {
         // infer the K next tokens with draft model
         for (int i = 0; i < K; ++i) {
@@ -365,10 +397,7 @@ int main(int argc, char* argv[]) try {
         auto ptr = is_prompt.data<bool>();
         reinterpret_cast<uint8_t*>(ptr)[0] = 2;
 
-        auto time2 = std::chrono::high_resolution_clock::now();
         main_model.infer();
-        auto time3 = std::chrono::high_resolution_clock::now();
-        std::cout << "Time for main model = " << time_res2 << "ms\n";
 
         data_logits = logits.data<float>();  // [BATCH_SIZE, K, vocab_size]
         size_t disagree_idx = K - 1;
