@@ -31,7 +31,7 @@ class ContinuousBatchingPipeline::Impl {
     std::shared_ptr<Sampler> m_sampler;
 
     // TODO (mzegla): GenerationConfig is request specific object
-    // and pipeline only uses default rng_seed. 
+    // and pipeline only uses default rng_seed.
     ov::genai::GenerationConfig m_generation_config;
 
     PipelineMetrics m_pipeline_metrics;
@@ -100,7 +100,7 @@ public:
         ov::InferRequest infer_request = core.compile_model(model, device_config.get_device(), plugin_config).create_infer_request();
 
         // setup KV caches
-        m_cache_manager = std::make_shared<CacheManager>(device_config);
+        m_cache_manager = std::make_shared<CacheManager>(device_config, core);
         for (size_t decoder_layer_id = 0; decoder_layer_id < device_config.get_num_layers(); ++decoder_layer_id) {
             infer_request.set_input_tensor(2 + decoder_layer_id * 2, m_cache_manager->get_key_cache(decoder_layer_id));
             infer_request.set_input_tensor(2 + decoder_layer_id * 2 + 1, m_cache_manager->get_value_cache(decoder_layer_id));
@@ -140,7 +140,7 @@ public:
         sampling_params.set_eos_token_id(m_tokenizer.get_eos_token_id());
         sampling_params.validate();
         SequenceGroup::Ptr sequence_group = std::make_shared<SequenceGroup>(request_id, input_ids,
-                                                                            sampling_params, 
+                                                                            sampling_params,
                                                                             m_scheduler->get_config().block_size,
                                                                             m_scheduler->get_config().enable_prefix_caching);
         sequence_group->set_sequence_group_ptr(sequence_group);
@@ -204,16 +204,22 @@ public:
             logits = m_model_runner->forward(m_requests, scheduler_output);
             timer.end();
 
+            ov::InferRequest infer_request = m_model_runner->get_infer_request();
+            ov::CompiledModel compiled_model = infer_request.get_compiled_model();
+            const bool is_profiling_enabled = compiled_model.get_property(ov::enable_profiling);
+
             // collect detailed statistic
-            std::vector<ov::ProfilingInfo> profiling_info = m_model_runner->get_infer_request().get_profiling_info();
-            for (const ov::ProfilingInfo& info : profiling_info) {
-                double current_time = info.real_time.count();
-                if (info.node_type == "PagedAttentionExtension") {
-                    m_perf.m_paged_attention_time_ms += current_time;
-                } else if (info.node_type == "FullyConnected") {
-                    m_perf.m_matmul_time_ms += current_time;
+            if (is_profiling_enabled) {
+                std::vector<ov::ProfilingInfo> profiling_info = m_model_runner->get_infer_request().get_profiling_info();
+                for (const ov::ProfilingInfo& info : profiling_info) {
+                    double current_time = info.real_time.count();
+                    if (info.node_type == "PagedAttentionExtension") {
+                        m_perf.m_paged_attention_time_ms += current_time;
+                    } else if (info.node_type == "FullyConnected") {
+                        m_perf.m_matmul_time_ms += current_time;
+                    }
+                    m_perf.m_infer_total_ms += current_time;
                 }
-                m_perf.m_infer_total_ms += current_time;
             }
         }
 

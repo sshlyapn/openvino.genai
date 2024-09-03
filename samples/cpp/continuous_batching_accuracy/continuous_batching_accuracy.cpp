@@ -12,6 +12,17 @@ void print_generation_result(const ov::genai::GenerationResult& generation_resul
     }
 }
 
+static size_t get_default_block_size(const std::string& device) {
+    const size_t cpu_block_size = 32;
+    const size_t gpu_block_size = 16;
+
+    bool is_gpu = device.find("GPU") != std::string::npos;
+
+    std::cout << "Default bs for device " << device << " is_gpu=" << is_gpu << "\n";
+
+    return is_gpu ? gpu_block_size : cpu_block_size;
+}
+
 int main(int argc, char* argv[]) try {
     // Command line options
 
@@ -21,6 +32,7 @@ int main(int argc, char* argv[]) try {
     ("n,num_prompts", "A number of prompts", cxxopts::value<size_t>()->default_value("1"))
     ("dynamic_split_fuse", "Whether to use dynamic split-fuse or vLLM scheduling", cxxopts::value<bool>()->default_value("false"))
     ("m,model", "Path to model and tokenizers base directory", cxxopts::value<std::string>()->default_value("."))
+    ("d,device", "Device to use for inference", cxxopts::value<std::string>()->default_value("CPU"))
     ("h,help", "Print usage");
 
     cxxopts::ParseResult result;
@@ -40,6 +52,7 @@ int main(int argc, char* argv[]) try {
     const size_t num_prompts = result["num_prompts"].as<size_t>();
     const bool dynamic_split_fuse = result["dynamic_split_fuse"].as<bool>();
     const std::string models_path = result["model"].as<std::string>();
+    const std::string device = result["device"].as<std::string>();
 
     // create dataset
 
@@ -66,13 +79,13 @@ int main(int argc, char* argv[]) try {
     }
 
     // Perform the inference
-    
+
     ov::genai::SchedulerConfig scheduler_config;
     // batch size
     scheduler_config.max_num_batched_tokens = 32;
     // cache params
     scheduler_config.num_kv_blocks = 364;
-    scheduler_config.block_size = 32;
+    scheduler_config.block_size = get_default_block_size(device);
     // mode - vLLM or dynamic_split_fuse
     scheduler_config.dynamic_split_fuse = dynamic_split_fuse;
     // vLLM specific params
@@ -80,7 +93,7 @@ int main(int argc, char* argv[]) try {
 
     // It's possible to construct a Tokenizer from a different path.
     // If the Tokenizer isn't specified, it's loaded from the same folder.
-    ov::genai::ContinuousBatchingPipeline pipe(models_path, ov::genai::Tokenizer{models_path}, scheduler_config);
+    ov::genai::ContinuousBatchingPipeline pipe(models_path, ov::genai::Tokenizer{models_path}, scheduler_config, device);
     std::vector<ov::genai::GenerationResult> generation_results = pipe.generate(prompts, sampling_params);
 
     for (size_t request_id = 0; request_id < generation_results.size(); ++request_id) {
@@ -104,7 +117,7 @@ int main(int argc, char* argv[]) try {
                 std::cout << "Partial result:" << std::endl;
                 print_generation_result(generation_result);
             }
-            break;   
+            break;
         default:
             break;
         }
