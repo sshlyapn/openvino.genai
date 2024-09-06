@@ -67,7 +67,7 @@ class OPENVINO_GENAI_EXPORTS GenerationHandleImpl {
     ov::genai::GenerationConfig m_sampling_params;
 
     bool is_dropped();
- 
+
 public:
     GenerationHandleImpl(std::shared_ptr<GenerationStream> generation_stream, const ov::genai::GenerationConfig& sampling_params) :
     m_generation_stream(std::move(generation_stream)),
@@ -87,7 +87,7 @@ public:
 
     GenerationOutputs back();
     // Reads result of a generation for single iteration
-    GenerationOutputs read();
+    GenerationOutputs read(bool dummy);
     // Reads all generated tokens for all sequences
     std::vector<GenerationOutput> read_all();
 };

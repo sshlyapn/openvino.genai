@@ -107,7 +107,7 @@ public:
     // appends new tokens to a generated part
     void append_token(int64_t token_id, float log_prob) {
         m_cumulative_log_prob += log_prob;
-        m_generated_ids.push_back(token_id);     
+        m_generated_ids.push_back(token_id);
     }
 
     GenerationOutput get_last_generation_output() {
@@ -146,7 +146,7 @@ public:
         return m_sequence_group.lock();
     }
 
-    // Each KV block can be uniquely identified by 
+    // Each KV block can be uniquely identified by
     // the tokens within the block and the tokens in the prefix before the block.
     // hash(prefix tokens + block tokens) <--> KV Block
     size_t get_hash(size_t content_length = 0);
@@ -166,7 +166,7 @@ class SequenceGroup {
     bool m_enable_prefix_caching;
 
     uint64_t m_next_sequence_id = 0;
- 
+
     // amount of processed tokens, e.g. prompt can be processed using multiple consequence inferences
     // so, we need to track which part of the prompt we have already processed
     size_t m_num_processed_tokens = 0;
@@ -180,7 +180,7 @@ class SequenceGroup {
           m_sampling_params(sampling_params),
           m_block_size(block_size),
           m_enable_prefix_caching(enable_prefix_caching) {
-            m_generation_stream = GenerationStream::create();    
+            m_generation_stream = GenerationStream::create();
            }
 public:
     using Ptr = std::shared_ptr<SequenceGroup>;
@@ -217,6 +217,7 @@ public:
             if (m_sampling_params.max_new_tokens == generated_len ||
                 running_sequence->get_generated_ids().back() == m_sampling_params.eos_token_id && !m_sampling_params.ignore_eos) {
                 // stop sequence by max_new_tokens or EOS token
+                std::cout << "Set finish status\n";
                 running_sequence->set_status(SequenceStatus::FINISHED);
 
                 if (running_sequence->get_generated_ids().back() == m_sampling_params.eos_token_id && !m_sampling_params.ignore_eos) {
@@ -224,7 +225,7 @@ public:
                 } else if (m_sampling_params.max_new_tokens == generated_len) {
                     running_sequence->set_finish_reason(GenerationFinishReason::LENGTH);
                 }
-                
+
                 dropped_seq_ids.push_back(running_sequence->get_id());
             }
         }
@@ -460,7 +461,7 @@ public:
             sequence->set_sequence_group_ptr(sequence_group);
         }
     }
-    
+
     GenerationStream::Ptr get_generation_stream() {
         return m_generation_stream;
     }
@@ -512,13 +513,13 @@ public:
                 push_outputs();
             }
         } else if (m_sampling_params.is_greedy_decoding() || m_sampling_params.is_multinomial()) {
-            // TO DO: Now we always stream for greedy search for the sake of benchmarking 
+            // TO DO: Now we always stream for greedy search for the sake of benchmarking
             if (num_total_seqs() == 1) {
                 push_partial_outputs();
             } else if (has_finished() || out_of_memory()) {
                 push_outputs();
             }
         }
-    } 
+    }
 };
 }

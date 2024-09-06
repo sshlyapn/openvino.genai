@@ -53,11 +53,7 @@ int main(int argc, char* argv[]) try {
     // create dataset
 
     std::vector<std::string> prompt_examples = {
-        "What is OpenVINO?",
-        "How are you?",
-        "What is your name?",
-        "Tell me something about Canada",
-        "What is OpenVINO?",
+        "Summarize the main ideas of Jeff Walker's Product Launch Formula into bullet points as it pertains to a growth marketing agency implementing these strategies and tactics for their clients...",
     };
 
     std::vector<ov::genai::GenerationConfig> sampling_params_examples {
@@ -87,7 +83,7 @@ int main(int argc, char* argv[]) try {
 
     ov::genai::SchedulerConfig scheduler_config;
     // batch size
-    scheduler_config.max_num_batched_tokens = use_prefix ? 256 : 32;
+    scheduler_config.max_num_batched_tokens = use_prefix ? 256 : 128;
     // cache params
     scheduler_config.num_kv_blocks = 364;
     scheduler_config.block_size = get_default_block_size(device);
@@ -131,7 +127,7 @@ int main(int argc, char* argv[]) try {
                 std::cout << "Partial result:" << std::endl;
                 print_generation_result(generation_result);
             }
-            break;   
+            break;
         default:
             break;
         }

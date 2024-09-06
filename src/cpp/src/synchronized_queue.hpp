@@ -44,4 +44,9 @@ public:
         std::unique_lock<std::mutex> lock(m_mutex);
         return m_queue.empty();
     }
+
+    size_t size() {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_queue.size();
+    }
 };

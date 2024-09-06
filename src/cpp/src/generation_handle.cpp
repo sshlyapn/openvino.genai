@@ -33,7 +33,7 @@ std::unordered_map<uint64_t, GenerationOutput> GenerationHandleImpl::back() {
     return m_generation_stream->back();
 }
 
-std::unordered_map<uint64_t, GenerationOutput> GenerationHandleImpl::read() {
+std::unordered_map<uint64_t, GenerationOutput> GenerationHandleImpl::read(bool dummy) {
     OPENVINO_ASSERT(!is_dropped(), "GenerationHandle cannot be used after it is dropped.");
     return m_generation_stream->read();
 }
@@ -58,7 +58,7 @@ std::vector<GenerationOutput> GenerationHandleImpl::read_all() {
     // We iterate until generation is running or there are tokens we haven't read yet
     while (get_status() == GenerationStatus::RUNNING || can_read()) {
         // For unary case there's only one iteration and we get all results in a single read() call
-        std::unordered_map<uint64_t, GenerationOutput> iteration_results = read();
+        std::unordered_map<uint64_t, GenerationOutput> iteration_results = read(false);
         add_partial_result(partial_results, iteration_results);
     }
 

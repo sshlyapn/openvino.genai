@@ -47,7 +47,6 @@ public:
         } else {
             // vLLM case
             // schedule prompt phase using whole prompt's input_ids
-            // note, that we also apply padding, while need to be considered by model runner
 
             _schedule_prompt_phase_vllm(sequence_groups, scheduler_output);
 
@@ -98,24 +97,30 @@ private:
     }
 
 
-    bool _preempt_by_recompute(SequenceGroup::Ptr sequence_group, size_t blocks_needed) {
+    bool _preempt_by_recompute(SequenceGroup::Ptr sequence_group, size_t blocks_needed, bool apply_partial_eviction) {
         size_t processed_tokens = sequence_group->get_num_processed_tokens();
         size_t block_size = m_config.block_size;
         size_t prev_blocks_count = m_block_manager.num_free_blocks();
         size_t preempted_tokens = 0;
         size_t num_blocks_occupied_by_sequence = m_block_manager.get_number_of_blocks_occupied_by_sequence(sequence_group);
 
-        if (num_blocks_occupied_by_sequence <= blocks_needed) {
+        if (num_blocks_occupied_by_sequence <= blocks_needed || !apply_partial_eviction) {
             auto sequences = sequence_group->get_not_finished_sequences();
             for (size_t s = 0; s < sequences.size(); ++s) {
                 auto seq_id = sequences[s]->get_id();
                 m_block_manager.free_sequence(seq_id);
+                std::cout << "Free " << seq_id << " " << "\n";
             }
-            sequence_group->preempt_tokens(processed_tokens);
+
+            if (apply_partial_eviction)
+                sequence_group->preempt_tokens(processed_tokens);
+            else
+                sequence_group->update_processed_tokens_num(0);
+
             sequence_group->set_waiting();
             return m_block_manager.num_free_blocks() > prev_blocks_count;
         }
-        
+
         size_t logical_blocks_released;
         if (sequence_group->get_sampling_parameters().is_beam_search()) {
             logical_blocks_released = m_block_manager.free_partially_beam_search_group(sequence_group, blocks_needed);
@@ -126,7 +131,7 @@ private:
 
         // calculate the number of preempted tokens
         auto tokens_in_last_block = processed_tokens % block_size;
-        if (tokens_in_last_block == 0) {    
+        if (tokens_in_last_block == 0) {
             tokens_in_last_block = block_size;
         }
         preempted_tokens = tokens_in_last_block + std::max<size_t>((int)logical_blocks_released - 1, 0) * block_size;
@@ -160,19 +165,21 @@ private:
     }
 
     void _apply_preemption(size_t sequence_group_id, const std::vector<SequenceGroup::Ptr>& sequence_groups) {
+        const bool apply_partial_eviction = false;
         SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
 
         // check whether current sequence requires a new slot / block
         while (!m_block_manager.can_append_slots(sequence_group)) {
             // let's run a sequence for eviction
             size_t evicted_sequence_group_id = _get_low_priority_sequence_group_id(sequence_groups);
-        
+
             if (evicted_sequence_group_id <= sequence_group_id) {
                 // we have a cycle when current group need to evict itself to be in a running state
                 break;
             }
+            std::cout << "evict " << evicted_sequence_group_id << "\n";
             size_t blocks_needed = m_block_manager.required_blocks_count(sequence_group);
-            if (!_preempt_by_recompute(sequence_groups[evicted_sequence_group_id], blocks_needed)){
+            if (!_preempt_by_recompute(sequence_groups[evicted_sequence_group_id], blocks_needed, apply_partial_eviction)){
                 break;
             }
         }
@@ -248,8 +255,10 @@ private:
                 size_t available_tokens_per_seq_in_megabatch = num_tokens_in_megabatch / num_running_seqs;
 
                 // we cannot schedule even a single token per each sequence in a group
-                if (!available_tokens_per_seq_in_megabatch)
+                if (!available_tokens_per_seq_in_megabatch) {
+                    std::cout << "zero available tokens happend\n";
                     continue;
+                }
 
                 // Note: current function can return more than 1 token even for generation phase in case of some tokens
                 // of current sequence group were evicted before
@@ -265,7 +274,7 @@ private:
                     sequence_group->clear_scheduled_tokens();
                     continue;
                 }
-                
+
                 // allocate new slots
                 std::map<size_t, std::list<size_t>> copy_blocks_map = m_block_manager.append_slots(sequence_group);
 
@@ -311,7 +320,7 @@ private:
         // TODO: it currently does not handle beam search, where beam width should contribute to total number of "num running sequences"
         size_t num_running_sequence_groups = _num_running_sequence_groups(sequence_groups);
 
-        for (size_t sequence_group_id = 0, num_scheduled_tokens = 0, max_sequence_len = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
+        for (size_t sequence_group_id = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
             SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
             if (!sequence_group->can_generate_tokens() && !sequence_group->is_waiting()) {
                 size_t num_running_seqs = sequence_group->num_running_seqs();
@@ -321,9 +330,8 @@ private:
                 if (!m_config.enable_prefix_caching)
                     OPENVINO_ASSERT(sequence_group->get_context_len() == 0);
 
-                int64_t num_available_tokens_in_megabatch = m_config.max_num_batched_tokens - scheduler_output.m_total_num_scheduled_tokens;
+                size_t num_available_tokens_in_megabatch = m_config.max_num_batched_tokens - scheduler_output.m_total_num_scheduled_tokens;
                 size_t sequence_len = sequence_group->get_num_available_tokens_for_batching();
-                max_sequence_len = std::max(max_sequence_len, sequence_len);
 
                 // TODO: better handling
                 // e.g. return status that sequence is ignored and cannot be processed by current scheduling algorigthm
@@ -334,7 +342,7 @@ private:
                     break;
 
                 // apply max num batched tokens limitation
-                if (num_available_tokens_in_megabatch < static_cast<int64_t>(max_sequence_len))
+                if (num_available_tokens_in_megabatch < sequence_len)
                     break;
 
                 // apply KV cache limitations
@@ -357,21 +365,20 @@ private:
                     {
                         scheduler_output.m_scheduled_sequence_groups_ids.push_back(sequence_group_id);
                         scheduler_output.m_block_tables[seq_id] = m_block_manager.get_block_table(seq_id);
-                        scheduler_output.m_total_num_scheduled_tokens = max_sequence_len * scheduler_output.m_scheduled_sequence_groups_ids.size();
+                        scheduler_output.m_total_num_scheduled_tokens += sequence_len;
                     }
 
                     // update "is_prompt" flag
                     scheduler_output.is_prompt = true;
                 }
 
-                num_scheduled_tokens += sequence_len;
                 num_running_sequence_groups += 1;
             }
         }
     }
 
     void _clear_waiting_sequences(const std::vector<SequenceGroup::Ptr>& sequence_groups) {
-        for (size_t sequence_group_id = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) { 
+        for (size_t sequence_group_id = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
             sequence_groups[sequence_group_id]->clear_waiting_sequences();
         }
     }

@@ -52,6 +52,10 @@ public:
         return m_status;
     }
 
+    size_t get_size() {
+        return m_output_queue.size();
+    }
+
     void drop() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_status = GenerationStatus::DROPPED_BY_HANDLE;

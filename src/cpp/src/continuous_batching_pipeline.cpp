@@ -31,7 +31,7 @@ class ContinuousBatchingPipeline::Impl {
     std::shared_ptr<Sampler> m_sampler;
 
     // TODO (mzegla): GenerationConfig is request specific object
-    // and pipeline only uses default rng_seed. 
+    // and pipeline only uses default rng_seed.
     ov::genai::GenerationConfig m_generation_config;
 
     PipelineMetrics m_pipeline_metrics;
@@ -64,8 +64,10 @@ class ContinuousBatchingPipeline::Impl {
         // Notify the last time by pushing empty output
         // This causes read() to unblock by adding anything to the queue
         for (SequenceGroup::Ptr& request : m_requests) {
-            if (request->handle_dropped())
+            if (request->handle_dropped()) {
+                std::cout << "push empty outputs\n";
                 request->push_empty_outputs();
+            }
         }
     }
 
@@ -78,6 +80,7 @@ class ContinuousBatchingPipeline::Impl {
                     m_scheduler->free_sequence(sequence->get_id());
                 }
                 m_sampler->clear_beam_search_info(request->get_request_id());
+                // std::cout << "Erase request " << requests_iterator->get()->
                 requests_iterator = m_requests.erase(requests_iterator);
             } else {
                 requests_iterator++;
@@ -140,7 +143,7 @@ public:
         sampling_params.set_eos_token_id(m_tokenizer.get_eos_token_id());
         sampling_params.validate();
         SequenceGroup::Ptr sequence_group = std::make_shared<SequenceGroup>(request_id, input_ids,
-                                                                            sampling_params, 
+                                                                            sampling_params,
                                                                             m_scheduler->get_config().block_size,
                                                                             m_scheduler->get_config().enable_prefix_caching);
         sequence_group->set_sequence_group_ptr(sequence_group);
@@ -164,6 +167,13 @@ public:
     }
 
     void step() {
+        static size_t steps_num = 0;
+        static size_t prev_step = 0;
+        if (prev_step + prev_step * 0.1f <= steps_num) {
+            prev_step = steps_num;
+            std::cout << "step=" << steps_num << "\n";
+        }
+        steps_num++;
         static ManualTimer step_timer("step()");
         step_timer.start();
 
@@ -185,6 +195,7 @@ public:
             m_cache_manager->copy_blocks(scheduler_output.m_block_copy_map);
             timer.end();
         }
+        // std::cout << "Scheduled tokens: " << scheduler_output.m_total_num_scheduled_tokens << " is_prompt=" << scheduler_output.is_prompt << "\n";
 
         // if no tokens were scheduled, we are out of memory
         if (scheduler_output.m_total_num_scheduled_tokens == 0) {
@@ -243,8 +254,9 @@ public:
                     m_scheduler->fork_sequence(parent_id, child_id);
             }
 
-            for (auto seq_id : sampler_output.m_dropped_sequences)
+            for (auto seq_id : sampler_output.m_dropped_sequences) {
                 m_scheduler->free_sequence(seq_id);
+            }
 
             timer.end();
         }
@@ -258,6 +270,50 @@ public:
             timer.end();
         }
 
+
+        // std::vector<EncodedGenerationResult> encoded;
+        // std::vector<SequenceGroup::Ptr>::iterator requests_iterator = m_requests.begin();
+        // for (const auto& request : m_requests) {
+        //     if (request->has_finished()) {
+
+        //         if (request->get_generation_stream()->get_status() == GenerationStatus::FINISHED && request->get_generation_stream()->can_read()) {
+        //             std::cout << "Has finished, status=" << static_cast<int>(request->get_generation_stream()->get_status()) << " queue size=" << request->get_generation_stream()->get_size() << "\n";
+        //             request->print_all_generated_ids();
+
+        //             EncodedGenerationResult result;
+        //             result.m_request_id = 1;
+        //             auto generation_outputs = request->get_generation_stream()->back();
+
+        //             auto num_outputs = generation_outputs.size();
+        //             for (size_t generation_output_idx = 0; generation_output_idx < num_outputs; ++generation_output_idx) {
+        //                 const auto& generation_output = generation_outputs[generation_output_idx];
+        //                 std::cout << "Generated ids len (" << generation_output_idx << ") = " << generation_output.generated_token_ids.size() << "\n";
+        //                 result.m_generation_ids.push_back(std::move(generation_output.generated_token_ids));
+        //                 result.m_scores.push_back(generation_output.score);
+        //             }
+
+        //             encoded.push_back(std::move(result));
+        //         }
+        //     }
+        // }
+
+        // std::cout << "Encoded " << encoded.size() << "\n";
+        // std::vector<GenerationResult> decoded;
+        // decoded.reserve(encoded.size());
+        // for (EncodedGenerationResult& res : encoded) {
+        //     std::vector<std::string> generated;
+        //     generated.reserve(res.m_generation_ids.size());
+        //     for (size_t idx = 0; idx < res.m_generation_ids.size(); ++idx) {
+        //         generated.push_back(m_tokenizer.decode(res.m_generation_ids.at(idx)));
+        //         if (m_is_chat_conversation && 0 == idx) {
+        //             m_history.push_back({{"role", "assistant"}, {"content", generated.back()}});
+        //         }
+        //     }
+        //     for (size_t i = 0; i < generated.size(); i++)
+        //         std::cout << "Generated " << i << ": " << generated[i] << "\n";
+        // }
+
+
         // free non running requests for current step
 
         {
@@ -266,6 +322,7 @@ public:
             _free_non_running_requests();
             timer.end();
         }
+
 
         step_timer.end();
     }
