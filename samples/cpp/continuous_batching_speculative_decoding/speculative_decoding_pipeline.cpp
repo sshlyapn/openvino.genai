@@ -23,7 +23,7 @@ SpeculativeDecodingPipeline::SpeculativeDecodingPipeline(
     m_tokenizer = ov::genai::Tokenizer(models_path, plugin_config);
 
     m_candidates_num = start_candidates_number;
-    m_max_candidates_num = 0;
+    m_max_candidates_num = m_candidates_num * 2;
     m_is_speculative_mode = m_candidates_num > 0;
 
     ov::Core core;
