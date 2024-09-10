@@ -40,7 +40,7 @@ class ContinuousBatchingPipeline::Impl {
     bool m_is_validation_mode_enabled = false;
 
     // TODO (mzegla): GenerationConfig is request specific object
-    // and pipeline only uses default rng_seed. 
+    // and pipeline only uses default rng_seed.
     ov::genai::GenerationConfig m_generation_config;
 
     PipelineMetrics m_pipeline_metrics;
@@ -148,7 +148,7 @@ public:
 
     Impl(const std::string& models_path, const SchedulerConfig& scheduler_config, const std::string& device, const ov::AnyMap& llm_plugin_config, const ov::AnyMap& tokenizer_plugin_config)
         : Impl{models_path, Tokenizer(models_path, tokenizer_plugin_config), scheduler_config, device, llm_plugin_config} {}
-    
+
     Impl(ov::Core& core, std::shared_ptr<ov::Model> model, const Tokenizer& tokenizer, const SchedulerConfig& scheduler_config, const std::string& device, const ov::AnyMap& plugin_config, bool is_validation_mode = false) :
         m_is_validation_mode_enabled(is_validation_mode),
         m_tokenizer{tokenizer} {
@@ -171,7 +171,7 @@ public:
         sampling_params.set_eos_token_id(m_tokenizer.get_eos_token_id());
         sampling_params.validate();
         SequenceGroup::Ptr sequence_group = std::make_shared<SequenceGroup>(request_id, input_ids,
-                                                                            sampling_params, 
+                                                                            sampling_params,
                                                                             m_scheduler->get_config().block_size,
                                                                             m_scheduler->get_config().enable_prefix_caching);
         sequence_group->set_sequence_group_ptr(sequence_group);
@@ -450,6 +450,7 @@ public:
             const auto request_id = request->get_request_id();
             for (const auto& sequence : request->get_sequences()) {
                 auto generated_ids = sequence->get_generated_ids();
+                // std::cout << "get_generated_sequences, request_id=" << request_id << ", generated_ids=" << generated_ids.size() << "\n";
                 auto log_probs = sequence->get_log_probs();
                 result.emplace_back(request_id, sequence->get_grouped_id(), generated_ids, log_probs);
             }
@@ -614,7 +615,7 @@ void ContinuousBatchingPipeline::finish_request(int64_t request_id) {
     m_impl->finish_request(request_id);
 }
 
-std::vector<ContinuousBatchingPipeline::GeneratedSequence> 
+std::vector<ContinuousBatchingPipeline::GeneratedSequence>
 ContinuousBatchingPipeline::get_generated_sequences() {
     return m_impl->get_generated_sequences();
 }

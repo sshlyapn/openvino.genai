@@ -67,6 +67,8 @@ public:
                     m_kv_cache_type = ov::element::f32;
                 }
             }
+
+            std::cout << "KV cache type " << m_kv_cache_type << "\n";
         } else {
             OPENVINO_THROW(m_device, " is not supported by OpenVINO Continuous Batching");
         }

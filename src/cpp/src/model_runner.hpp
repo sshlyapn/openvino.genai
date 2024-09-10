@@ -59,7 +59,7 @@ public:
         int64_t
             * input_ids_data = input_ids.data<int64_t>(),
             * position_ids_data = position_ids.data<int64_t>();
-        int32_t 
+        int32_t
             * past_lens_data = past_lens.data<int32_t>(),
             * subsequence_begins_data = subsequence_begins.data<int32_t>(),
             * block_indices_data = block_indices.data<int32_t>(),
@@ -121,6 +121,22 @@ public:
         m_request.set_tensor("block_indices", block_indices);
         m_request.set_tensor("block_indices_begins", block_indices_begins);
         m_request.set_tensor("max_context_len", max_context_len);
+
+        auto print_arr = [&](ov::Tensor tensor, std::string name) {
+            auto data_ptr = tensor.data<int32_t>();
+
+            std::stringstream ss;
+            for (size_t i = 0; i < tensor.get_size(); i++) {
+                ss << data_ptr[i] << ", ";
+            }
+            std::cout << "Array " << name << " (len=" << tensor.get_size() << ") content: " << ss.str() << "\n";
+        };
+
+        print_arr(past_lens, "past_lens");
+        print_arr(subsequence_begins, "subsequence_begins");
+        print_arr(block_indices, "block_indices");
+        print_arr(block_indices_begins, "block_indices_begins");
+        print_arr(max_context_len, "max_context_len");
 
         // print_tensor("input_ids", input_ids);
         // print_tensor("position_ids", position_ids);

@@ -23,7 +23,7 @@ SpeculativeDecodingPipeline::SpeculativeDecodingPipeline(
     m_tokenizer = ov::genai::Tokenizer(models_path, plugin_config);
 
     m_candidates_num = start_candidates_number;
-    m_max_candidates_num = m_candidates_num * 2;
+    m_max_candidates_num = 0;
     m_is_speculative_mode = m_candidates_num > 0;
 
     ov::Core core;
@@ -51,6 +51,7 @@ SpeculativeDecodingPipeline::SpeculativeDecodingPipeline(
 void SpeculativeDecodingPipeline::step() {
     std::vector<ov::genai::ContinuousBatchingPipeline::GeneratedSequence> candidate_sequences;
     if (m_is_speculative_mode) {
+        std::cout << "================== Draft model ======================\n";
         // find minimum(candidates_number, seq_len) to generate candidates
         size_t min_candidates_number = m_candidates_num;
         for (auto& request : m_to_generate_length) {
@@ -60,21 +61,47 @@ void SpeculativeDecodingPipeline::step() {
         }
         // generate candidates by speculative model
         for (size_t i = 0; i < min_candidates_number; ++i) {
+            auto time0 = std::chrono::high_resolution_clock::now();
             m_speculative_pipeline.step();
+            auto time1 = std::chrono::high_resolution_clock::now();
+            auto time_res0 = std::chrono::duration_cast<std::chrono::milliseconds>(time1 - time0).count();
+            std::cout << "Draft model time = " << time_res0 << " ms\n";
         }
 
         // put candidates to model KV cache
         candidate_sequences = m_speculative_pipeline.get_generated_sequences();
+        for (const auto& s : candidate_sequences) {
+            std::cout << "Draft model:     ";
+            for (size_t i = 0; i < s.token_ids.size(); i++) {
+                std::cout << s.token_ids[i] << " (" << s.log_probs[i] << ") ";
+            }
+            std::cout << std::endl;
+        }
+
         for (const auto& candidate : candidate_sequences) {
             m_pipeline.update_generated_sequence(candidate);
         }
+        std::cout << "================== Draft model end ======================\n";
     }
 
     // validate candidates and generate 1 new token
+    std::cout << "================== Main model ======================\n";
+    auto time0 = std::chrono::high_resolution_clock::now();
     m_pipeline.step();
+    auto time1 = std::chrono::high_resolution_clock::now();
+    auto time_res0 = std::chrono::duration_cast<std::chrono::milliseconds>(time1 - time0).count();
+    std::cout << "Main model time = " << time_res0 << " ms\n";
 
     if (m_is_speculative_mode) {
         auto checked_sequences = m_pipeline.get_generated_sequences();
+        for (const auto& s : checked_sequences) {
+            std::cout << "Main model:     ";
+            for (size_t i = 0; i < s.token_ids.size(); i++) {
+                std::cout << s.token_ids[i] << " (" << s.log_probs[i] << ") ";
+            }
+            std::cout << std::endl;
+        }
+
         size_t max_removed_token_cnt = 0;
         for (const auto& checked_sequence : checked_sequences) {
             auto update_result = m_speculative_pipeline.update_generated_sequence(checked_sequence);
@@ -88,11 +115,14 @@ void SpeculativeDecodingPipeline::step() {
         for (auto& request : m_to_generate_length) {
             if (request.second > num_matches) {
                 request.second -= (num_matches + 1);
+                std::cout << "Set request=" << request.first << " generate_length=" << request.second << "\n";
             } else {
                 request.second = 0;
+                std::cout << "Set request=" << request.first << " to zero(!)\n";
                 m_speculative_pipeline.finish_request(request.first);
             }
         }
+        std::cout << "================== Main model end (matches = " << num_matches << ") ======================\n";
     }
 }
 

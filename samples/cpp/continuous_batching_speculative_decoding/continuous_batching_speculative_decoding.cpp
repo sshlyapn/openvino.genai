@@ -25,6 +25,7 @@ int main(int argc, char* argv[]) try {
     ("a,assisting_model", "Path to assisting model and tokenizers base directory", cxxopts::value<std::string>()->default_value("."))
     ("k,candidates_number", "candidates_number", cxxopts::value<size_t>()->default_value("5"))
     ("g,generated_len", "generated_len", cxxopts::value<size_t>()->default_value("30"))
+    ("d,device", "device", cxxopts::value<std::string>()->default_value("CPU"))
     ("h,help", "Print usage");
 
     cxxopts::ParseResult result;
@@ -47,11 +48,13 @@ int main(int argc, char* argv[]) try {
     const std::string assisting_models_path = result["assisting_model"].as<std::string>();
     const size_t k = result["candidates_number"].as<size_t>();
     const size_t g = result["generated_len"].as<size_t>();
+    const std::string device = result["device"].as<std::string>();
 
+    std::cout << "Device " << device << "\n";
     // create dataset
 
     std::vector<std::string> prompt_examples = {
-        "The United Arab Emirates[c] (UAE), or simply the Emirates,[d] is a country in West Asia, in the Middle East, at the eastern end of the Arabian Peninsula. It is a federal, elective monarchy composed of seven emirates, with Abu Dhabi as its capital.[13] It shares land borders with Oman to the east and northwest, and with Saudi Arabia to the southwest; as well as maritime borders in the Persian Gulf with Qatar and Iran, and with Oman in the Gulf of Oman.",
+        // "The United Arab Emirates[c] (UAE), or simply the Emirates,[d] is a country in West Asia, in the Middle East, at the eastern end of the Arabian Peninsula. It is a federal, elective monarchy composed of seven emirates, with Abu Dhabi as its capital.[13] It shares land borders with Oman to the east and northwest, and with Saudi Arabia to the southwest; as well as maritime borders in the Persian Gulf with Qatar and Iran, and with Oman in the Gulf of Oman.",
         "What is OpenVINO?",
         "How are you?",
         "What is your name?",
@@ -61,6 +64,7 @@ int main(int argc, char* argv[]) try {
 
     auto greedy = ov::genai::greedy();
     greedy.max_new_tokens = g;
+    greedy.temperature = 0.0f;
 
     std::vector<ov::genai::GenerationConfig> sampling_params_examples {
         // ov::genai::beam_search(),
@@ -78,12 +82,21 @@ int main(int argc, char* argv[]) try {
 
     // Perform the inference
 
+    auto get_default_block_size = [](const std::string& device) {
+        const size_t cpu_block_size = 32;
+        const size_t gpu_block_size = 16;
+
+        bool is_gpu = device.find("GPU") != std::string::npos;
+
+        return is_gpu ? gpu_block_size : cpu_block_size;
+    };
+
     ov::genai::SchedulerConfig scheduler_config;
     // batch size
-    scheduler_config.max_num_batched_tokens = 32;
+    scheduler_config.max_num_batched_tokens = 512;
     // cache params
-    scheduler_config.num_kv_blocks = 364;
-    scheduler_config.block_size = 32;
+    scheduler_config.num_kv_blocks = 200;
+    scheduler_config.block_size = get_default_block_size(device);
     // mode - vLLM or dynamic_split_fuse
     scheduler_config.dynamic_split_fuse = dynamic_split_fuse;
     // vLLM specific params
@@ -91,7 +104,7 @@ int main(int argc, char* argv[]) try {
 
     // It's possible to construct a Tokenizer from a different path.
     // If the Tokenizer isn't specified, it's loaded from the same folder.
-    SpeculativeDecodingPipeline pipe(models_path, assisting_models_path, k, scheduler_config, "CPU");
+    SpeculativeDecodingPipeline pipe(models_path, assisting_models_path, k, scheduler_config, device);
     std::vector<ov::genai::GenerationResult> generation_results = pipe.generate(prompts, sampling_params);
 
     for (size_t request_id = 0; request_id < generation_results.size(); ++request_id) {
@@ -115,7 +128,7 @@ int main(int argc, char* argv[]) try {
                 std::cout << "Partial result:" << std::endl;
                 print_generation_result(generation_result);
             }
-            break;   
+            break;
         default:
             break;
         }
