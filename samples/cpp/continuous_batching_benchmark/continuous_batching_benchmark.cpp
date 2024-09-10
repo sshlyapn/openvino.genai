@@ -192,11 +192,13 @@ class GenerationInfo {
 
 public:
     std::string p_prompt;
+    size_t p_request_id;
 
-    GenerationInfo(ov::genai::GenerationHandle generation_handle, size_t input_len, std::string prompt = "") : input_len(input_len), p_prompt(prompt)
+    GenerationInfo(size_t request_id, ov::genai::GenerationHandle generation_handle, size_t input_len, std::string prompt = "") : input_len(input_len), p_prompt(prompt)
     {
         this->generation_handle = std::move(generation_handle);
         start_time = std::chrono::steady_clock::now();
+        p_request_id = request_id;
     }
 
     void update_sequence(int64_t sequence_id, const std::vector<int64_t>& tokens) {
@@ -289,7 +291,7 @@ public:
     void add_generation(ov::genai::ContinuousBatchingPipeline* pipe, Dataset* dataset, size_t request_id) {
         ov::genai::GenerationHandle generation_handle = pipe->add_request(request_id, dataset->m_prompts[request_id], dataset->m_sampling_params[request_id]);
         std::lock_guard<std::mutex> lock(mutex);
-        generations_info.emplace_back(std::move(generation_handle), dataset->m_input_lens[request_id], dataset->m_prompts[request_id]);
+        generations_info.emplace_back(request_id, std::move(generation_handle), dataset->m_input_lens[request_id], dataset->m_prompts[request_id]);
     }
 
     size_t run() {
@@ -329,7 +331,7 @@ public:
         for (GenerationInfo& generation_info : generations_info) {
             std::cout << "========================================================================================================================================\n";
             auto results = generation_info.get_results(pipe.get_tokenizer());
-            std::cout << "Prompt: " << generation_info.p_prompt << "\n";
+            std::cout << "Prompt [" << generation_info.p_request_id << "]: " << generation_info.p_prompt << "\n";
             for (size_t i = 0; i < results.size(); i++) {
                 std::cout << "Generated[" << i << "]: " << results[i] << "\n";
             }

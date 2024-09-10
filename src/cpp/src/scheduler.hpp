@@ -165,7 +165,7 @@ private:
     }
 
     void _apply_preemption(size_t sequence_group_id, const std::vector<SequenceGroup::Ptr>& sequence_groups) {
-        const bool apply_partial_eviction = false;
+        const bool apply_partial_eviction = m_config.dynamic_split_fuse;
         SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
 
         // check whether current sequence requires a new slot / block

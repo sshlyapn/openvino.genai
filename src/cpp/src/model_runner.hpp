@@ -59,7 +59,7 @@ public:
         int64_t
             * input_ids_data = input_ids.data<int64_t>(),
             * position_ids_data = position_ids.data<int64_t>();
-        int32_t 
+        int32_t
             * past_lens_data = past_lens.data<int32_t>(),
             * subsequence_begins_data = subsequence_begins.data<int32_t>(),
             * block_indices_data = block_indices.data<int32_t>(),
@@ -68,6 +68,19 @@ public:
         // sub-sequence data starts with 0
         subsequence_begins_data[0] = 0;
         block_indices_begins_data[0] = 0;
+
+        auto print_arr2 = [&](const std::vector<uint64_t>& vec, size_t max_len, std::string name) {
+            std::stringstream ss;
+            for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+                SequenceGroup::CPtr sequence_group = sequence_groups[vec[i]];
+                ss << sequence_group->get_request_id() << ", ";
+            }
+            std::cout << "Array " << name << " (len=" << vec.size() << ") content: " << ss.str() << "\n";
+        };
+
+
+
+        print_arr2(scheduler_output.m_scheduled_sequence_groups_ids, scheduler_output.m_scheduled_sequence_groups_ids.size(), "m_scheduled_sequence_groups_ids");
 
         for (size_t i = 0; i < num_sequence_groups; ++i) {
             size_t seq_group_id = scheduler_output.m_scheduled_sequence_groups_ids[i];
@@ -110,6 +123,22 @@ public:
                 block_indices_begins_data += 1;
             }
         }
+
+        auto print_arr = [&](ov::Tensor tensor, std::string name) {
+            auto data_ptr = tensor.data<int32_t>();
+
+            std::stringstream ss;
+            for (size_t i = 0; i < tensor.get_size(); i++) {
+                ss << data_ptr[i] << ", ";
+            }
+            std::cout << "Array " << name << " (len=" << tensor.get_size() << ") content: " << ss.str() << "\n";
+        };
+
+        print_arr(past_lens, "past_lens");
+        print_arr(subsequence_begins, "subsequence_begins");
+        print_arr(block_indices, "block_indices");
+        print_arr(block_indices_begins, "block_indices_begins");
+        print_arr(max_context_len, "max_context_len");
 
         // typical LLM parameters
         m_request.set_tensor("input_ids", input_ids);
