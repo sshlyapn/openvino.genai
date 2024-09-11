@@ -109,12 +109,18 @@ public:
                 auto print_arr22 = [&](size_t max_len) {
                     std::stringstream ss;
                     std::stringstream ss2;
+                    std::stringstream ss_generated_tokens;
                     for (size_t i = 0; i < max_len; i++) {
                         ss << input_ids_data[i] << ", ";
                         ss2 << position_ids_data[i] << ", ";
                     }
+                    for (size_t i = 0; i < sequence->get_generated_ids().size(); i++) {
+                        ss_generated_tokens << sequence->get_generated_ids()[i] << ", ";
+                    }
+
                     if (sequence_group->get_request_id() == 67 || sequence_group->get_request_id() == 68) {
                         std::cout << "Input ids for " << sequence_group->get_request_id() << " (len=" << max_len<< ") content: " << ss.str() << "\n";
+                        std::cout << "Generated tokens: " << ss_generated_tokens.str() << "\n";
                         if (max_len == 1) {
                             auto position_id = position_ids_data[0];
                             std::cout << "position_id=" << position_id << ", prompt_len=" << sequence_group->get_prompt_len() << "\n";

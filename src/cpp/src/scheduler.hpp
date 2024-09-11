@@ -112,10 +112,12 @@ private:
                 std::cout << "Free seq_id=" << seq_id << " request_id=" << sequence_group->get_request_id() << "\n";
             }
 
-            if (apply_partial_eviction)
+            if (apply_partial_eviction) {
                 sequence_group->preempt_tokens(processed_tokens);
-            else
+            } else {
                 sequence_group->update_processed_tokens_num(0);
+                sequence_group->reset_generated_ids();
+            }
 
             sequence_group->set_waiting();
             return m_block_manager.num_free_blocks() > prev_blocks_count;

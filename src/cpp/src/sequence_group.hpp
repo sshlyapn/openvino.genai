@@ -127,6 +127,10 @@ public:
         return m_generated_ids;
     }
 
+    void reset_generated_ids() {
+        m_generated_ids.clear();
+    }
+
     float get_cumulative_log_probs() const {
         return m_cumulative_log_prob;
     }
@@ -384,6 +388,14 @@ public:
     void update_processed_tokens_num(size_t processed_tokens) {
         m_num_processed_tokens = processed_tokens;
         m_max_content_len = processed_tokens;
+    }
+
+    void reset_generated_ids() {
+        for (size_t seq_id = 0; seq_id < m_sequences.size(); ++seq_id) {
+            if (m_sequences[seq_id]->is_running()) {
+                m_sequences[seq_id]->reset_generated_ids();
+            }
+        }
     }
 
     void clear_waiting_sequences() {
