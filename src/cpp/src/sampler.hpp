@@ -194,7 +194,7 @@ public:
 
                     // mark current sequence as finished
                     beam.m_sequence->set_status(SequenceStatus::FINISHED);
-                    // Setting length since this function is used when sequence generated tokens number reaches max_new_tokens 
+                    // Setting length since this function is used when sequence generated tokens number reaches max_new_tokens
                     beam.m_sequence->set_finish_reason(GenerationFinishReason::LENGTH);
                     // we also need to drop add ongoing / forked sequences from scheduler
                     sampler_output.m_dropped_sequences.push_back(sequence_id);
@@ -220,15 +220,38 @@ class Sampler {
     Token _greedy_sample(const Logits& logits) const {
         // For greedy sampling we do not expect sorting or shrinking considered tokens
         // so we can operate directly on the data buffer
+        float prev_max_value = -std::numeric_limits<float>::infinity();
         float max_value = -std::numeric_limits<float>::infinity();
         size_t max_index = 0;
         for (size_t i = 0; i < logits.m_size; ++i) {
             if (logits.m_data[i] > max_value) {
+                prev_max_value = max_value;
                 max_value = logits.m_data[i];
                 max_index = i;
             }
         }
         return Token(logits.m_data[max_index], max_index);
+    }
+
+    struct IndexedValue {
+        float value;
+        int index;
+    };
+
+    std::vector<IndexedValue> _greedy_sample_prev(const Logits& logits, size_t tokens_num) const {
+        // For greedy sampling we do not expect sorting or shrinking considered tokens
+        // so we can operate directly on the data buffer
+        std::vector<IndexedValue> indexedValues;
+        for (int i = 0; i < logits.m_size; ++i) {
+            indexedValues.push_back({logits.m_data[i], i});
+        }
+
+        std::sort(indexedValues.begin(), indexedValues.end(),  [&](const IndexedValue& a, const IndexedValue& b){
+            return a.value > b.value;
+        });
+
+        std::vector<IndexedValue> result(indexedValues.begin(), indexedValues.begin() + tokens_num);
+        return result;
     }
 
     std::vector<Token> _multinomial_sample(const Logits& logits, size_t num_tokens_per_sequence) {
@@ -241,7 +264,7 @@ class Sampler {
             multinomial_weights.assign(logits.m_data, logits.m_data + logits.m_size);
 
         auto dist = std::discrete_distribution<size_t>(multinomial_weights.begin(), multinomial_weights.end()); // equivalent to multinomial with number of trials == 1
-        
+
         std::vector<Token> out_tokens;
         for (size_t token_idx = 0; token_idx < num_tokens_per_sequence; ++token_idx) {
             size_t element_to_pick = dist(rng_engine);
@@ -275,6 +298,7 @@ SamplerOutput Sampler::sample(std::vector<SequenceGroup::Ptr> & sequence_groups,
     size_t batch_seq_len = logits_shape[1], vocab_size = logits_shape[2];
 
     SamplerOutput sampler_output;
+    bool enable_warning = true;
 
     for (size_t sequence_group_id = 0, currently_processed_tokens = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
         SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
@@ -306,11 +330,27 @@ SamplerOutput Sampler::sample(std::vector<SequenceGroup::Ptr> & sequence_groups,
                     running_sequence->append_token(sampled_token_id.m_index, sampled_token_id.m_log_prob);
                 };
                 for (size_t running_sequence_id = 0; running_sequence_id < num_running_sequences; ++running_sequence_id) {
+
                     auto logit_vector = _get_logit_vector(sequence_group_logits, running_sequence_id);
                     logit_processor.apply(logit_vector);
                     Token sampled_token_id;
                     if (sampling_params.is_greedy_decoding()) {
                         sampled_token_id = _greedy_sample(logit_vector);
+
+                    auto print_arr = [&](const std::vector<IndexedValue>& vec, size_t max_len) {
+                        std::stringstream ss;
+                        for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+                            ss << vec[i].index << " (" << vec[i].value << ") ";
+                        }
+                        std::cout << "Sampling of " << sequence_group->get_request_id() << ", shape: " << sequence_group_logits.get_shape() << ", tokens: " << ss.str() << "\n";
+                    };
+
+
+                    if (sequence_group->get_request_id() == 67 || sequence_group->get_request_id() == 68) {
+                        auto top_tokens = _greedy_sample_prev(logit_vector, 5);
+                        print_arr(top_tokens, top_tokens.size());
+                    }
+
                     } else {
                         // is_multinomial()
                         const bool is_generate_n_tokens = sequence_group->num_total_seqs() == 1;
@@ -329,7 +369,7 @@ SamplerOutput Sampler::sample(std::vector<SequenceGroup::Ptr> & sequence_groups,
                             sampler_output.m_forked_sequences.insert({running_sequences[0]->get_id(), forked_seq_ids});
                         }
                     }
-                    
+
                     register_new_token(sampled_token_id, running_sequences[running_sequence_id]);
                 }
                 logit_processor.increment_gen_tokens();
@@ -355,10 +395,14 @@ SamplerOutput Sampler::sample(std::vector<SequenceGroup::Ptr> & sequence_groups,
                     m_beam_search_info.at(request_id).finalize(sampler_output);
                 }
             }
-            // Notify handle after sampling is done. 
+            // Notify handle after sampling is done.
             // For non-streaming this is effective only when the generation is finished.
             sequence_group->notify_handle();
         } else {
+            if (enable_warning) {
+                std::cout << "WARNING: Prompt processed stage!\n";
+                enable_warning = false;
+            }
             // we are in prompt processing phase when prompt is split into chunks and processed step by step
         }
 
@@ -599,7 +643,7 @@ void GroupBeamSearcher::select_next_tokens(const ov::Tensor& logits, SamplerOutp
     }
 }
 
-void Sampler::clear_beam_search_info(uint64_t request_id) { 
+void Sampler::clear_beam_search_info(uint64_t request_id) {
     m_beam_search_info.erase(request_id);
 }
 }

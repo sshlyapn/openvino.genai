@@ -212,6 +212,17 @@ public:
 
     void update(ov::genai::GenerationOutputs& outputs){
         for (auto const& output: outputs) {
+            if (p_request_id == 68 || p_request_id == 67) {
+                auto print_arr = [&](const std::vector<int64_t>& vec, size_t max_len, std::string name) {
+                    std::stringstream ss;
+                    for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+                        ss << vec[i] << ", ";
+                    }
+                    std::cout << "Got ids for request_id " << name << " (len=" << vec.size() << "): " << ss.str() << "\n";
+                };
+
+                print_arr(output.second.generated_token_ids, output.second.generated_token_ids.size(), std::to_string(p_request_id));
+            }
             update_sequence(output.first, output.second.generated_token_ids);
         }
     }

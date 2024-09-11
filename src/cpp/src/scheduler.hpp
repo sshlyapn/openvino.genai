@@ -109,7 +109,7 @@ private:
             for (size_t s = 0; s < sequences.size(); ++s) {
                 auto seq_id = sequences[s]->get_id();
                 m_block_manager.free_sequence(seq_id);
-                std::cout << "Free " << seq_id << " " << "\n";
+                std::cout << "Free seq_id=" << seq_id << " request_id=" << sequence_group->get_request_id() << "\n";
             }
 
             if (apply_partial_eviction)

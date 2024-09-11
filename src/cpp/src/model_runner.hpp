@@ -105,14 +105,48 @@ public:
                     position_ids_data[token_id] = position_id;
                 }
 
+
+                auto print_arr22 = [&](size_t max_len) {
+                    std::stringstream ss;
+                    std::stringstream ss2;
+                    for (size_t i = 0; i < max_len; i++) {
+                        ss << input_ids_data[i] << ", ";
+                        ss2 << position_ids_data[i] << ", ";
+                    }
+                    if (sequence_group->get_request_id() == 67 || sequence_group->get_request_id() == 68) {
+                        std::cout << "Input ids for " << sequence_group->get_request_id() << " (len=" << max_len<< ") content: " << ss.str() << "\n";
+                        if (max_len == 1) {
+                            auto position_id = position_ids_data[0];
+                            std::cout << "position_id=" << position_id << ", prompt_len=" << sequence_group->get_prompt_len() << "\n";
+                        }
+                        std::cout << "Position ids for " << sequence_group->get_request_id() << " (len=" << max_len<< ") content: " << ss2.str() << "\n";
+                    }
+                };
+
+                print_arr22(num_scheduled_tokens);
+
                 past_lens_data[0] = group_context_len;
 
                 subsequence_begins_data[1] = subsequence_begins_data[0] + num_scheduled_tokens;
                 block_indices_begins_data[1] = block_indices_begins_data[0] + num_blocks;
 
                 const std::vector<KVCacheBlock::Ptr> & kv_blocks = scheduler_output.m_block_tables.at(sequence->get_id());
-                for (size_t block_id = 0; block_id < num_blocks; ++block_id)
+                std::vector<int> indexes;
+                for (size_t block_id = 0; block_id < num_blocks; ++block_id) {
                     block_indices_data[block_id] = kv_blocks[block_id]->get_index();
+                    indexes.push_back(kv_blocks[block_id]->get_index());
+                }
+
+                auto print_arr = [&](const std::vector<int>& vec, size_t max_len, std::string name) {
+                    std::stringstream ss;
+                    for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+                        ss << vec[i] << ", ";
+                    }
+                    if (sequence_group->get_request_id() == 67 || sequence_group->get_request_id() == 68)
+                        std::cout << "Block indexes for " << sequence_group->get_request_id() << " " << name << " (len=" << vec.size() << ") content: " << ss.str() << "\n";
+                };
+
+                print_arr(indexes, indexes.size(), "");
 
                 // apply strides to shift to a next sequence
                 input_ids_data += num_scheduled_tokens;
