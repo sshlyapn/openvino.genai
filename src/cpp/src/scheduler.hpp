@@ -8,11 +8,14 @@
 #include <vector>
 
 #include "openvino/genai/scheduler_config.hpp"
+#include "device_config.hpp"
 #include "block_manager.hpp"
 #include "sequence_group.hpp"
 
 namespace ov::genai {
 class Scheduler {
+    bool m_can_use_partial_preemption;
+
     SchedulerConfig m_config;
     BlockManager m_block_manager;
 
@@ -32,8 +35,11 @@ public:
         float m_cache_usage = 0.0;
     };
 
-    explicit Scheduler(const SchedulerConfig & config = {}) :
-        m_config(config), m_block_manager(m_config.num_kv_blocks, m_config.enable_prefix_caching, m_config.block_size) { }
+    explicit Scheduler(const SchedulerConfig & config = {}, bool can_use_partial_preemption = true) :
+        m_can_use_partial_preemption(can_use_partial_preemption),
+        m_config(config),
+        m_block_manager(m_config.num_kv_blocks, m_config.enable_prefix_caching, m_config.block_size) {
+    }
 
     Output schedule(std::vector<SequenceGroup::Ptr>& sequence_groups) {
         Output scheduler_output;
@@ -47,7 +53,6 @@ public:
         } else {
             // vLLM case
             // schedule prompt phase using whole prompt's input_ids
-            // note, that we also apply padding, while need to be considered by model runner
 
             _schedule_prompt_phase_vllm(sequence_groups, scheduler_output);
 
@@ -105,7 +110,7 @@ private:
         size_t preempted_tokens = 0;
         size_t num_blocks_occupied_by_sequence = m_block_manager.get_number_of_blocks_occupied_by_sequence(sequence_group);
 
-        if (num_blocks_occupied_by_sequence <= blocks_needed) {
+        if (num_blocks_occupied_by_sequence <= blocks_needed || !m_can_use_partial_preemption) {
             auto sequences = sequence_group->get_not_finished_sequences();
             for (size_t s = 0; s < sequences.size(); ++s) {
                 auto seq_id = sequences[s]->get_id();
@@ -311,9 +316,10 @@ private:
         // TODO: it currently does not handle beam search, where beam width should contribute to total number of "num running sequences"
         size_t num_running_sequence_groups = _num_running_sequence_groups(sequence_groups);
 
-        for (size_t sequence_group_id = 0, num_scheduled_tokens = 0, max_sequence_len = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
+        for (size_t sequence_group_id = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
             SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
-            if (!sequence_group->can_generate_tokens() && !sequence_group->is_waiting()) {
+            const bool recompute_evicted_sequences = sequence_group->get_num_processed_tokens() == 0 && !m_can_use_partial_preemption;
+            if ((!sequence_group->can_generate_tokens() || recompute_evicted_sequences) && !sequence_group->is_waiting()) {
                 size_t num_running_seqs = sequence_group->num_running_seqs();
                 // prompt phases can have a single running sequence
                 OPENVINO_ASSERT(num_running_seqs == 1);
@@ -321,9 +327,8 @@ private:
                 if (!m_config.enable_prefix_caching)
                     OPENVINO_ASSERT(sequence_group->get_context_len() == 0);
 
-                int64_t num_available_tokens_in_megabatch = m_config.max_num_batched_tokens - scheduler_output.m_total_num_scheduled_tokens;
+                size_t num_available_tokens_in_megabatch = m_config.max_num_batched_tokens - scheduler_output.m_total_num_scheduled_tokens;
                 size_t sequence_len = sequence_group->get_num_available_tokens_for_batching();
-                max_sequence_len = std::max(max_sequence_len, sequence_len);
 
                 // TODO: better handling
                 // e.g. return status that sequence is ignored and cannot be processed by current scheduling algorigthm
@@ -334,7 +339,7 @@ private:
                     break;
 
                 // apply max num batched tokens limitation
-                if (num_available_tokens_in_megabatch < static_cast<int64_t>(max_sequence_len))
+                if (num_available_tokens_in_megabatch < sequence_len)
                     break;
 
                 // apply KV cache limitations
