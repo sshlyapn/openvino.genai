@@ -149,9 +149,11 @@ class GenerationInfo {
         std::chrono::milliseconds cumulated_tpot;
         std::chrono::milliseconds mean_tpot;
         size_t num_output_tokens;
-    
+
         std::chrono::steady_clock::time_point start_time;
         std::chrono::steady_clock::time_point last_read_time;
+
+        std::vector<int64_t> p_token_ids;
 
         SequenceInfo(std::chrono::steady_clock::time_point& start_time) {
             num_output_tokens = 0;
@@ -183,26 +185,45 @@ class GenerationInfo {
 
     ov::genai::GenerationHandle generation_handle;
     std::chrono::steady_clock::time_point start_time;
-    std::unordered_map<int64_t, SequenceInfo> sequences_info;
     bool active = true;
-    size_t input_len;
+
 
 public:
-    GenerationInfo(ov::genai::GenerationHandle generation_handle, size_t input_len) : input_len(input_len)
+    std::string p_prompt;
+    size_t p_request_id;
+    size_t input_len;
+    std::unordered_map<int64_t, SequenceInfo> sequences_info;
+
+    GenerationInfo(size_t request_id, ov::genai::GenerationHandle generation_handle, size_t input_len, std::string prompt = "") : input_len(input_len), p_prompt(prompt)
     {
         this->generation_handle = std::move(generation_handle);
         start_time = std::chrono::steady_clock::now();
+        p_request_id = request_id;
     }
 
-    void update_sequence(int64_t sequence_id) {
+    void update_sequence(int64_t sequence_id, const std::vector<int64_t>& tokens) {
         if (sequences_info.find(sequence_id) == sequences_info.end())
             sequences_info.emplace(sequence_id, SequenceInfo(start_time));
         sequences_info.at(sequence_id).update();
+
+        auto& processed_tokens = sequences_info.at(sequence_id).p_token_ids;
+        processed_tokens.insert(processed_tokens.end(), tokens.begin(), tokens.end());
     }
 
     void update(ov::genai::GenerationOutputs& outputs){
         for (auto const& output: outputs) {
-            update_sequence(output.first);
+            if (p_request_id == 68 || p_request_id == 67) {
+                auto print_arr = [&](const std::vector<int64_t>& vec, size_t max_len, std::string name) {
+                    std::stringstream ss;
+                    for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+                        ss << vec[i] << ", ";
+                    }
+                    std::cout << "Got ids for request_id " << name << " (len=" << vec.size() << "): " << ss.str() << "\n";
+                };
+
+                print_arr(output.second.generated_token_ids, output.second.generated_token_ids.size(), std::to_string(p_request_id));
+            }
+            update_sequence(output.first, output.second.generated_token_ids);
         }
     }
 
@@ -238,6 +259,28 @@ public:
         generation_metrics.num_input_tokens = input_len;
         return generation_metrics;
     }
+
+    std::vector<std::string> get_results(ov::genai::Tokenizer tokenizer) {
+        std::vector<std::string> results;
+
+        ov::genai::EncodedGenerationResult encoded;
+        encoded.m_request_id = 1;
+        for (auto& sequenceInfoPair : sequences_info) {
+            encoded.m_generation_ids.push_back(sequenceInfoPair.second.p_token_ids);
+            encoded.m_scores.push_back(0.0);
+        }
+
+        ov::genai::GenerationResult decoded;
+        std::vector<std::string> generated;
+        generated.reserve(encoded.m_generation_ids.size());
+        for (size_t idx = 0; idx < encoded.m_generation_ids.size(); ++idx) {
+            generated.push_back(tokenizer.decode(encoded.m_generation_ids.at(idx)));
+        }
+        // for (size_t i = 0; i < generated.size(); i++)
+        //     std::cout << "Generated " << i << ": " << generated[i] << "\n";
+
+        return generated;
+    }
 };
 
 class GenerationInfoCollector {
@@ -246,7 +289,11 @@ class GenerationInfoCollector {
     size_t num_finished = 0;
     std::chrono::steady_clock::time_point start_time;
 
+    ov::genai::ContinuousBatchingPipeline pipe;
+
 public:
+
+    GenerationInfoCollector(ov::genai::ContinuousBatchingPipeline pipeline) : pipe(pipeline) {}
 
     void set_start_time(std::chrono::steady_clock::time_point start_time) {
         this->start_time = start_time;
@@ -255,7 +302,7 @@ public:
     void add_generation(ov::genai::ContinuousBatchingPipeline* pipe, Dataset* dataset, size_t request_id) {
         ov::genai::GenerationHandle generation_handle = pipe->add_request(request_id, dataset->m_prompts[request_id], dataset->m_sampling_params[request_id]);
         std::lock_guard<std::mutex> lock(mutex);
-        generations_info.emplace_back(std::move(generation_handle), dataset->m_input_lens[request_id]);
+        generations_info.emplace_back(request_id, std::move(generation_handle), dataset->m_input_lens[request_id], dataset->m_prompts[request_id]);
     }
 
     size_t run() {
@@ -263,7 +310,7 @@ public:
         for (GenerationInfo& generation_info : generations_info) {
             if (!generation_info.is_active())
                 continue;
-            
+
             if (generation_info.is_finished()) {
                 num_finished++;
                 generation_info.set_inactive();
@@ -281,8 +328,8 @@ public:
         std::chrono::milliseconds mean_tpot = std::chrono::milliseconds::zero();
         size_t total_input_len = 0;
         size_t total_output_len = 0;
-        
-    
+
+
         for (GenerationInfo& generation_info : generations_info){
             auto generation_metrics = generation_info.get_metrics();
             mean_ttft += generation_metrics.mean_ttft;
@@ -290,15 +337,30 @@ public:
             total_input_len += generation_metrics.num_input_tokens;
             total_output_len += generation_metrics.num_output_tokens;
         }
+
+
+        for (GenerationInfo& generation_info : generations_info) {
+            std::cout << "========================================================================================================================================\n";
+            auto results = generation_info.get_results(pipe.get_tokenizer());
+            std::cout << "Prompt [" << generation_info.p_request_id << "] (len=" << generation_info.input_len << "): " << generation_info.p_prompt << "\n";
+            for (size_t i = 0; i < results.size(); i++) {
+                std::cout << "Generated[" << i << "] (len=" << generation_info.sequences_info.at(i).p_token_ids.size() << "): " << results[i] << "\n";
+            }
+            std::cout << "========================================================================================================================================\n";
+        }
+
+        std::cout << "Here2[n]\n";
+
         mean_ttft /= generations_info.size();
         mean_tpot /= generations_info.size();
+        double total_time = total_duration.count() + std::numeric_limits<double>::epsilon();
         std::cout << "Benchmark duration: " << total_duration.count() << " s" << std::endl;
         std::cout << "Total number of input tokens: " << total_input_len << std::endl;
         std::cout << "Total number of output tokens: " << total_output_len << std::endl;
-        std::cout << "Input throughput: " << total_input_len / total_duration.count() << " tokens / s" << std::endl;
-        std::cout << "Output throughput: " << total_output_len / total_duration.count() << " tokens / s" << std::endl;
+        std::cout << "Input throughput: " << total_input_len / total_time << " tokens / s" << std::endl;
+        std::cout << "Output throughput: " << total_output_len / total_time << " tokens / s" << std::endl;
         std::cout << "Mean TTFT: " << mean_ttft.count() << " ms" << std::endl;
-        std::cout << "Mean TPOT: " << mean_tpot.count() << " ms" << std::endl; 
+        std::cout << "Mean TPOT: " << mean_tpot.count() << " ms" << std::endl;
     }
 };
 
@@ -433,6 +495,7 @@ int main(int argc, char* argv[]) try {
     ("dataset", "Path to dataset .json file", cxxopts::value<std::string>()->default_value("./ShareGPT_V3_unfiltered_cleaned_split.json"))
     ("max_input_len", "Max input length take from dataset", cxxopts::value<size_t>()->default_value("1024"))
     ("max_output_len", "Max output length", cxxopts::value<size_t>()->default_value("2048"))
+    ("max_num_seqs", "Max number sequences (ignored for enabled dynamic_split_fuse)", cxxopts::value<size_t>()->default_value("256"))
     ("request_rate", "Number of requests per second. If this is inf, then all the requests are sent at time 0. Otherwise, we use Poisson process to synthesize the request arrival times.", cxxopts::value<std::string>()->default_value("inf"))
     ("cache_size", "Size of memory used for KV cache in GB. Default: 16", cxxopts::value<size_t>()->default_value("16"))
     ("device", "Target device to run the model. Default: CPU", cxxopts::value<std::string>()->default_value("CPU"))
@@ -464,6 +527,7 @@ int main(int argc, char* argv[]) try {
     const std::string device = result["device"].as<std::string>();
     const std::string device_config = result["device_config"].as<std::string>();
     const size_t cache_size = result["cache_size"].as<size_t>();
+    const size_t max_num_seqs = result["max_num_seqs"].as<size_t>();
 
     // Create requests for generation
     Dataset dataset = filtered_dataset(models_path, dataset_path, num_prompts, max_input_len, max_output_len);
@@ -483,7 +547,7 @@ int main(int argc, char* argv[]) try {
     scheduler_config.cache_size = cache_size,
     scheduler_config.block_size = get_default_block_size(device),
     scheduler_config.dynamic_split_fuse = dynamic_split_fuse,
-    scheduler_config.max_num_seqs = 256, // not used if dynamic_split_fuse=True
+    scheduler_config.max_num_seqs = max_num_seqs, // not used if dynamic_split_fuse=True
 
     std::cout << "Benchmarking parameters: " << std::endl;
     std::cout << "\tMax number of batched tokens: " << scheduler_config.max_num_batched_tokens << std::endl;
@@ -503,21 +567,21 @@ int main(int argc, char* argv[]) try {
         std::cout << "ERROR: Wrong json parameter in device_config." << std::endl;
         return EXIT_FAILURE;
     }
-    
+
     // Benchmarking
     std::cout << "Loading models, creating pipelines, preparing environment..." << std::endl;
     ov::genai::ContinuousBatchingPipeline pipe(models_path, scheduler_config, device, device_config_map);
 
     std::cout << "Setup finished, launching LLM executor, traffic simulation and statistics reporter threads" << std::endl;
 
-    GenerationInfoCollector generation_info_collector;
+    GenerationInfoCollector generation_info_collector(pipe);
 
     std::atomic<bool> finishGenerationThread{false};
     if (request_rate == "inf") {
         std::thread trafficSimulatorThread(trafficSimulator, &pipe, &dataset, request_rate, &generation_info_collector);
         trafficSimulatorThread.join();
     }
-    
+
     std::thread lmmEngineThread(llmEngineLoop, &pipe, &dataset, &finishGenerationThread);
     std::thread statisticsReporterThread(statisticsReporter, &generation_info_collector, num_prompts);
     if (request_rate != "inf") {
