@@ -37,16 +37,32 @@ SpeculativeDecodingPipeline::SpeculativeDecodingPipeline(
         size_t model_cache_size = get_kv_cache_size(model),
                assisting_cache_size = get_kv_cache_size(assisting_model);
         auto k = float(assisting_cache_size) / (model_cache_size + assisting_cache_size);
-        auto cache_size = scheduler_config.num_kv_blocks;
-        auto assisted_cache_size = size_t(cache_size * k);
-        cache_size -= assisted_cache_size;
+        auto cache_size = scheduler_config.num_kv_blocks / 2;
+        auto assisted_cache_size = scheduler_config.num_kv_blocks / 2;
         model_scheduler_config.num_kv_blocks = cache_size;
         assisting_scheduler_config.num_kv_blocks = assisted_cache_size;
-        m_speculative_pipeline = ov::genai::ContinuousBatchingPipeline(core, assisting_model, m_tokenizer, assisting_scheduler_config, device, plugin_config, false);
+        std::cout << "Main model blocks " << model_scheduler_config.num_kv_blocks << "\n";
+        std::cout << "Draft model blocks " << assisting_scheduler_config.num_kv_blocks << "\n";
+        int USE_CPU = 0;
+        if (const auto env_var = std::getenv("USE_CPU")) {
+            std::istringstream ss(env_var);
+            ss >> USE_CPU;
+        }
+
+        if (USE_CPU) {
+            std::cout << "Use CPU for draft model inference\n";
+            assisting_scheduler_config.block_size = 32;
+            m_speculative_pipeline = ov::genai::ContinuousBatchingPipeline(core, assisting_model, m_tokenizer, assisting_scheduler_config, "CPU", plugin_config, false);
+        } else {
+            std::cout << "Use " << device << " for draft model inference\n";
+            m_speculative_pipeline = ov::genai::ContinuousBatchingPipeline(core, assisting_model, m_tokenizer, assisting_scheduler_config, device, plugin_config, false);
+        }
     }
 
     m_pipeline = ov::genai::ContinuousBatchingPipeline(core, model, m_tokenizer, model_scheduler_config, device, plugin_config, true);
 }
+
+static size_t num_matches_global = 0;
 
 void SpeculativeDecodingPipeline::step() {
     std::vector<ov::genai::ContinuousBatchingPipeline::GeneratedSequence> candidate_sequences;
@@ -105,11 +121,23 @@ void SpeculativeDecodingPipeline::step() {
         size_t max_removed_token_cnt = 0;
         for (const auto& checked_sequence : checked_sequences) {
             auto update_result = m_speculative_pipeline.update_generated_sequence(checked_sequence);
+            std::cout << "Update results = " << update_result.to_insert << " " <<  update_result.to_remove << "\n";
             max_removed_token_cnt = std::max(max_removed_token_cnt, update_result.to_remove);
         }
         OPENVINO_ASSERT(m_candidates_num >= max_removed_token_cnt);
         auto num_matches = m_candidates_num - max_removed_token_cnt;
         update_strategy(num_matches);
+
+        bool empty = false;
+        for (auto& request : m_to_generate_length) { 
+            if (request.second <= num_matches)
+                empty = true;
+        }
+        
+        if (!empty) {
+            std::cout << "Num_matches=" << num_matches << "\n";
+            num_matches_global += num_matches;
+        }
 
         // update to generate tokens
         for (auto& request : m_to_generate_length) {
@@ -145,7 +173,12 @@ SpeculativeDecodingPipeline::generate(const std::vector<std::string>& prompts,
     }
 
     while (m_pipeline.has_non_finished_requests()) {
-        step();
+        try {
+            step();
+        } catch (const ov::Exception& e) {
+            std::cout << "Error: " << e.what() << "\n";
+            break;
+        }
     }
     if (m_is_speculative_mode) {
         // finish all speculative requests
@@ -167,16 +200,20 @@ SpeculativeDecodingPipeline::generate(const std::vector<std::string>& prompts,
             const auto& generation_output = generation_outputs[generation_output_idx];
             result.m_generation_ids.push_back(std::move(generation_output.generated_token_ids));
             result.m_scores.push_back(generation_output.score);
+            std::cout << "Tokens info: " << result.m_generation_ids[0].size() << " generated tokens\n";
         }
         result.m_status = generation->get_status();
         encoded_results.push_back(std::move(result));
     }
+
+    std::cout << "Total matches: " << num_matches_global << "\n";
 
     OPENVINO_ASSERT(encoded_results.size() == prompts.size());
 
     std::vector<ov::genai::GenerationResult> decoded_results;
     for (ov::genai::EncodedGenerationResult& res : encoded_results) {
         std::vector<std::string> generated;
+        std::cout << "Tokens info: Decoding " << res.m_generation_ids.size() << " generated tokens\n";
         generated.reserve(res.m_generation_ids.size());
         for (size_t idx = 0; idx < res.m_generation_ids.size(); ++idx) {
             generated.push_back(m_tokenizer.decode(res.m_generation_ids.at(idx)));

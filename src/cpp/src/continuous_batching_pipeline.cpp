@@ -30,6 +30,7 @@ ov::genai::read_model_and_apply_paged_attention(const std::string& models_path, 
     apply_paged_attention_transformations(model);
     return model;
 }
+static bool printed = false;
 
 class ContinuousBatchingPipeline::Impl {
     ov::genai::Tokenizer m_tokenizer;
@@ -190,6 +191,10 @@ public:
         static ManualTimer timer("tokenize");
         timer.start();
         ov::Tensor input_ids = m_tokenizer.encode(prompt).input_ids;
+        if (!printed) {
+            std::cout << "Tokens info: Add request with " << input_ids.get_shape() << " prompt tokens\n";
+            printed = true;
+        }
         timer.end();
         return add_request(request_id, input_ids, sampling_params);
     }
@@ -229,7 +234,12 @@ public:
         {
             static ManualTimer timer("forward");
             timer.start();
-            logits = m_model_runner->forward(m_requests, scheduler_output);
+            try {
+                logits = m_model_runner->forward(m_requests, scheduler_output);
+            } catch (const ov::Exception& ex) {
+                std::cout << ex.what() << "\n";
+                exit(0);
+            }
             timer.end();
 
             ov::InferRequest infer_request = m_model_runner->get_infer_request();

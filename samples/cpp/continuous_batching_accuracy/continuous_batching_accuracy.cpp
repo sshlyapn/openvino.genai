@@ -60,7 +60,11 @@ int main(int argc, char* argv[]) try {
         "What is OpenVINO?",
     };
 
+    // auto greedy = ov::genai::greedy();
+    // greedy.max_new_tokens = 5;
+
     std::vector<ov::genai::GenerationConfig> sampling_params_examples {
+        // greedy
         ov::genai::beam_search(),
         ov::genai::greedy(),
         ov::genai::multinomial(),
@@ -68,6 +72,8 @@ int main(int argc, char* argv[]) try {
 
     std::vector<std::string> prompts(num_prompts);
     std::vector<ov::genai::GenerationConfig> sampling_params(num_prompts);
+
+    std::cout << "num prompts " << num_prompts << "\n";
 
     for (size_t request_id = 0; request_id < num_prompts; ++request_id) {
         prompts[request_id] = use_prefix ? prefix_str + prompt_examples[request_id % prompt_examples.size()]

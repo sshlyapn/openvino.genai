@@ -282,7 +282,7 @@ int main(int argc, char* argv[]) try {
 
     size_t max_sequence_length = std::stoi(std::string{argv[5]});
 
-    AssistedCandidateGenerator candidateGenerator{draft_model, max_sequence_length, std::stoi(std::string{argv[4]}), draft_model_seq_len_axis};
+    AssistedCandidateGenerator candidateGenerator{draft_model, max_sequence_length, static_cast<size_t>(std::stoi(std::string{argv[4]})), draft_model_seq_len_axis};
 
     main_model.set_tensor("input_ids", input_ids);
     main_model.set_tensor("attention_mask", attention_mask);
