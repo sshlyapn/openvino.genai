@@ -203,7 +203,7 @@ ProcessorConfig from_any_map(
 }
 
 /**
- * scheduler_config is a separate config for continuous batching pipeline. 
+ * scheduler_config is a separate config for continuous batching pipeline.
  * This routine splits scheduler_config from plugin_config.
  */
 std::pair<ov::AnyMap, SchedulerConfig> split_scheduler_config(const ov::AnyMap& properties) {
@@ -295,8 +295,23 @@ void apply_gather_before_matmul_transformation(std::shared_ptr<ov::Model> model)
     std::shared_ptr<ov::Node> matmul = nullptr;
     int64_t slice_gather_dim = -1;
     std::tie(matmul, slice_gather_dim) = find_llm_matmul(model);
+    auto matmul_input_shape = matmul->input(0).get_partial_shape();
 
-    if (matmul && matmul->input(0).get_partial_shape().rank().get_length() == 3) {
+    if (matmul && matmul_input_shape.rank().get_length() == 3) {
+        // Paged Attention transformation note:
+        // Some models (e.g., chatglm3) after PA transformation may have seq_len dimension in a non-default position.
+        // To handle such cases, check if the first dimension is static and the
+        // next dimension is dynamic (assuming that seq_len dimension should be dynamic).
+        // If this is not the case, then use default gather axis (0).
+        // Possible cases are:
+        // [?, 1, vocab_size] => slice_gather_dim=0
+        // [1, ?, vocab_size] => slice_gather_dim=1
+        // Any other combinations => slice_gather_dim=0
+        if (slice_gather_dim == 0 && matmul_input_shape[slice_gather_dim].is_static() &&
+            matmul_input_shape[slice_gather_dim].get_length() == 1 && matmul_input_shape[1].is_dynamic()) {
+            slice_gather_dim = 1;
+        }
+
         auto indices = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{-1});
         indices->set_friendly_name("sampled_tokens_indices");
         indices->output(0).get_tensor().set_names({"sampled_tokens_indices"});
