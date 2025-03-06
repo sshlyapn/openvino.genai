@@ -492,6 +492,7 @@ def main():
     if args.cb_config:
         kwargs["cb_config"] = read_cb_config(args.cb_config)
 
+    print("Device:", args.device)
     if args.gt_data and os.path.exists(args.gt_data):
         evaluator = create_evaluator(None, args)
     else:

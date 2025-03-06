@@ -108,6 +108,15 @@ void ContinuousBatchingPipeline::ContinuousBatchingImpl::initialize_pipeline(
     m_num_decoder_layers = cache_manager->get_num_decoder_layers();
     m_block_size = cache_manager->get_block_size();
 
+    std::cout << "Created ContinuousBatchingPipeline with the following properties:\n"
+              << "\tcache_size: " << scheduler_config.cache_size << "\n"
+              << "\tdynamic_split_fuse: " << scheduler_config.dynamic_split_fuse << "\n"
+              << "\tenable_prefix_caching: " << scheduler_config.enable_prefix_caching << "\n"
+              << "\tmax_num_batched_tokens: " << scheduler_config.max_num_batched_tokens << "\n"
+              << "\tmax_num_seqs: " << scheduler_config.max_num_seqs << "\n"
+              << "\tnum_kv_blocks: " << scheduler_config.num_kv_blocks << "\n"
+              << "\tuse_cache_eviction: " << scheduler_config.use_cache_eviction << "\n";
+
     // Scheduler
     SchedulerConfig normalized_config = scheduler_config;
     if (normalized_config.num_kv_blocks == 0 && normalized_config.cache_size > 0) {

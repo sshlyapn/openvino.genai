@@ -147,6 +147,7 @@ ov::genai::LLMPipeline::LLMPipeline(
     }
 
     if (m_pimpl == nullptr) {
+        std::cout << "WARNING: fallback to LLM Pipeline\n";
         m_pimpl = std::make_unique<StatefulLLMPipeline>(models_path, tokenizer, device, properties);
     }
 
